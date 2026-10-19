@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-import json, os, re, secrets, sqlite3, time, uuid
+import hashlib, hmac, json, os, re, secrets, sqlite3, subprocess, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -9,6 +9,34 @@ ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('TRAINLY_DB', ROOT / 'trainly.sqlite3'))
 FILES = Path(os.environ.get('TRAINLY_STORAGE', ROOT / 'storage'))
 FILES.mkdir(parents=True, exist_ok=True)
+COOKIE_SECURE = os.environ.get('TRAINLY_SECURE_COOKIE', '').lower() in ('1', 'true', 'yes')
+
+def password_hash(password):
+    salt=secrets.token_bytes(16); rounds=310000
+    digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,rounds).hex()
+    return f'pbkdf2_sha256${rounds}${salt.hex()}${digest}'
+
+def password_matches(password,stored):
+    if not stored.startswith('pbkdf2_sha256$'): return hmac.compare_digest(password,stored)
+    try:
+        scheme,rounds,salt,digest=stored.split('$',3)
+        actual=hashlib.pbkdf2_hmac('sha256',password.encode(),bytes.fromhex(salt),int(rounds)).hex()
+        return hmac.compare_digest(actual,digest)
+    except (ValueError,TypeError): return False
+
+def inspect_video(path,extension):
+    try:
+        result=subprocess.run([os.environ.get('TRAINLY_FFPROBE','ffprobe'),'-v','error','-show_entries','format=duration,format_name','-show_entries','stream=codec_type','-of','json',str(path)],capture_output=True,text=True,timeout=30,check=True)
+        metadata=json.loads(result.stdout); duration=float(metadata['format']['duration']); formats=metadata['format']['format_name'].split(',')
+        streams=metadata.get('streams',[])
+        valid_format=bool(set(formats)&({'.mp4':{'mov','mp4','m4a','3gp','3g2','mj2'},'.mov':{'mov','mp4','m4a','3gp','3g2','mj2'},'.webm':{'webm','matroska'}}[extension]))
+        if not valid_format or not any(s.get('codec_type')=='video' for s in streams): raise ValueError('The selected file is not a valid video in the chosen format.')
+        if duration<=0: raise ValueError('The video duration could not be read.')
+        if duration>120*60: raise ValueError('This video is longer than the 120-minute limit.')
+        return int(round(duration))
+    except FileNotFoundError as e: raise ValueError('Video inspection is unavailable. Install FFprobe or set TRAINLY_FFPROBE.') from e
+    except subprocess.TimeoutExpired as e: raise ValueError('Video inspection took too long. Try a shorter or simpler video.') from e
+    except subprocess.CalledProcessError as e: raise ValueError('The selected file could not be inspected as a video.') from e
 
 SCHEMA = '''
 PRAGMA foreign_keys=ON;
@@ -19,6 +47,7 @@ CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, module_id TEXT, ord INTE
 CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, prompt TEXT, options TEXT, answer INTEGER, explanation TEXT, at REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, module_id TEXT, learner INTEGER, started INTEGER, completed INTEGER, score INTEGER DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id));
 CREATE TABLE IF NOT EXISTS answers(id INTEGER PRIMARY KEY, attempt_id TEXT, question_id TEXT, choice INTEGER, correct INTEGER, FOREIGN KEY(attempt_id) REFERENCES attempts(id));
+CREATE TABLE IF NOT EXISTS attempt_progress(attempt_id TEXT PRIMARY KEY, position REAL NOT NULL DEFAULT 0, completed_lessons TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(attempt_id) REFERENCES attempts(id) ON DELETE CASCADE);
 '''
 def db():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA); return c
@@ -26,7 +55,7 @@ def db():
 def seed():
     c=db()
     for email,name,pwd,role in [('creator@trainly.local','Alex Morgan','trainly','creator'),('learner@trainly.local','Jamie Lee','trainly','learner')]:
-        c.execute('INSERT OR IGNORE INTO users(email,name,password,role) VALUES(?,?,?,?)',(email,name,pwd,role))
+        c.execute('INSERT OR IGNORE INTO users(email,name,password,role) VALUES(?,?,?,?)',(email,name,password_hash(pwd),role))
     if not c.execute('SELECT 1 FROM modules').fetchone():
         owner=c.execute("SELECT id FROM users WHERE role='creator'").fetchone()[0]; mid='workplace-safety'
         c.execute('INSERT INTO modules(id,owner,title,description,duration,status,published_at) VALUES(?,?,?,?,?,?,?)',(mid,owner,'Workplace safety essentials','A practical introduction to safer, more confident work.',568,'published',int(time.time())))
@@ -38,6 +67,10 @@ def seed():
 seed()
 
 def module_row(c, mid): return c.execute('SELECT * FROM modules WHERE id=?',(mid,)).fetchone()
+def attempt_state(c, attempt):
+    progress=c.execute('SELECT position,completed_lessons FROM attempt_progress WHERE attempt_id=?',(attempt['id'],)).fetchone()
+    answered=[r['question_id'] for r in c.execute('SELECT DISTINCT question_id FROM answers WHERE attempt_id=?',(attempt['id'],))]
+    return dict(id=attempt['id'],position=progress['position'] if progress else 0,completed_lessons=json.loads(progress['completed_lessons']) if progress else [],answered_questions=answered,completed=bool(attempt['completed']))
 def package(c,m,include_answers=False):
     questions=[]
     for x in c.execute('SELECT * FROM questions WHERE module_id=? ORDER BY ord',(m['id'],)):
@@ -114,9 +147,10 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/login':
             try: data=json.loads(raw)
             except: return self.json(400,{'error':'Enter your login details.'})
-            c=db(); row=c.execute('SELECT * FROM users WHERE email=? AND password=?',(data.get('email','').lower(),data.get('password',''))).fetchone()
-            if not row: c.close(); return self.json(401,{'error':'Email or password is incorrect.'})
-            token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(24); c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(token,row['id'],csrf,int(time.time())+86400*14)); c.commit(); c.close(); return self.json(200,{'user':dict(id=row['id'],name=row['name'],email=row['email'],role=row['role']),'csrf':csrf},headers={'Set-Cookie':f'trainly={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600'})
+            c=db(); row=c.execute('SELECT * FROM users WHERE email=?',(data.get('email','').lower(),)).fetchone()
+            if not row or not password_matches(data.get('password',''),row['password']): c.close(); return self.json(401,{'error':'Email or password is incorrect.'})
+            if not row['password'].startswith('pbkdf2_sha256$'): c.execute('UPDATE users SET password=? WHERE id=?',(password_hash(data.get('password','')),row['id']))
+            token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(24); c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(token,row['id'],csrf,int(time.time())+86400*14)); c.commit(); c.close(); secure='; Secure' if COOKIE_SECURE else ''; return self.json(200,{'user':dict(id=row['id'],name=row['name'],email=row['email'],role=row['role']),'csrf':csrf},headers={'Set-Cookie':f'trainly={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600{secure}'})
         if path=='/api/logout':
             if user:
                 c=db(); c.execute('DELETE FROM sessions WHERE token=?',(user['token'],)); c.commit(); c.close()
@@ -148,17 +182,41 @@ class Handler(BaseHTTPRequestHandler):
                 ext=Path(filename).suffix.lower()
                 if filedata is None or ext not in ('.mp4','.mov','.webm'):c.close();return self.json(400,{'error':'Choose an MP4, MOV, or WebM video.'})
                 if len(filedata)>1024*1024*1024:c.close();return self.json(413,{'error':'This video is larger than the 1 GB limit.'})
-                asset=f'{mid}-{uuid.uuid4().hex[:8]}{ext}'; (FILES/asset).write_bytes(filedata); c.execute('UPDATE modules SET video=?,duration=0 WHERE id=?',(asset,mid)); c.commit(); c.close(); return self.json(200,{'ok':True,'filename':filename,'message':'Video saved. Add the lesson and quiz content below; automatic transcription will be available after an AI provider is configured.'})
+                asset=f'{mid}-{uuid.uuid4().hex[:8]}{ext}'; video_path=FILES/asset; video_path.write_bytes(filedata)
+                try: duration=inspect_video(video_path,ext)
+                except ValueError as e: video_path.unlink(missing_ok=True); c.close(); return self.json(400,{'error':str(e)})
+                c.execute('UPDATE modules SET video=?,duration=? WHERE id=?',(asset,duration,mid)); c.commit(); c.close(); return self.json(200,{'ok':True,'filename':filename,'duration':duration,'message':f'Video saved and checked ({duration//60} min). Add the lesson and quiz content below; automatic transcription will be available after an AI provider is configured.'})
             c.close();return self.json(404,{'error':'Not found'})
-        if path.startswith('/api/attempts'):
+        if path=='/api/attempts':
             data=json.loads(raw or b'{}'); mid=data.get('module_id'); m=module_row(c,mid)
             if not m or m['status']!='published':c.close();return self.json(404,{'error':'Published module not found.'})
-            aid=uuid.uuid4().hex; c.execute('INSERT INTO attempts(id,module_id,learner,started) VALUES(?,?,?,?)',(aid,mid,user['id'],int(time.time())));c.commit();c.close();return self.json(201,{'id':aid})
+            attempt=c.execute('SELECT * FROM attempts WHERE module_id=? AND learner=? AND completed IS NULL ORDER BY started DESC LIMIT 1',(mid,user['id'])).fetchone()
+            if not attempt:
+                aid=uuid.uuid4().hex; c.execute('INSERT INTO attempts(id,module_id,learner,started) VALUES(?,?,?,?)',(aid,mid,user['id'],int(time.time()))); attempt=c.execute('SELECT * FROM attempts WHERE id=?',(aid,)).fetchone()
+            c.execute('INSERT OR IGNORE INTO attempt_progress(attempt_id) VALUES(?)',(attempt['id'],));c.commit();result=attempt_state(c,attempt);c.close();return self.json(200,result)
         if path.startswith('/api/attempts/'):
-            aid=path.split('/')[3]; data=json.loads(raw or b'{}'); qid=data.get('question_id'); choice=data.get('choice'); attempt=c.execute('SELECT * FROM attempts WHERE id=? AND learner=?',(aid,user['id'])).fetchone(); q=c.execute('SELECT * FROM questions WHERE id=? AND module_id=?',(qid,attempt['module_id'] if attempt else '')).fetchone()
+            parts=path.strip('/').split('/'); aid=parts[2] if len(parts)>2 else ''; attempt=c.execute('SELECT * FROM attempts WHERE id=? AND learner=?',(aid,user['id'])).fetchone()
+            if not attempt:c.close();return self.json(404,{'error':'Attempt not found.'})
+            if len(parts)==4 and parts[3]=='progress':
+                data=json.loads(raw or b'{}'); progress=c.execute('SELECT position,completed_lessons FROM attempt_progress WHERE attempt_id=?',(aid,)).fetchone(); done=set(json.loads(progress['completed_lessons'])) if progress else set()
+                position=max(0,float(data.get('position',progress['position'] if progress else 0))); lesson_id=data.get('lesson_id')
+                if lesson_id:
+                    valid=c.execute('SELECT 1 FROM lessons WHERE id=? AND module_id=?',(lesson_id,attempt['module_id'])).fetchone()
+                    if not valid:c.close();return self.json(400,{'error':'Lesson not found in this module.'})
+                    done.add(lesson_id)
+                c.execute('INSERT INTO attempt_progress(attempt_id,position,completed_lessons) VALUES(?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET position=excluded.position,completed_lessons=excluded.completed_lessons',(aid,position,json.dumps(sorted(done))))
+                total_lessons=c.execute('SELECT COUNT(*) FROM lessons WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]
+                answered=c.execute('SELECT COUNT(DISTINCT question_id) FROM answers WHERE attempt_id=?',(aid,)).fetchone()[0]
+                total_questions=c.execute('SELECT COUNT(*) FROM questions WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]
+                completed=int(time.time()) if total_lessons and len(done)>=total_lessons and total_questions and answered>=total_questions else None
+                if completed:c.execute('UPDATE attempts SET completed=? WHERE id=?',(completed,aid))
+                c.commit();c.close();return self.json(200,{'position':position,'completed_lessons':sorted(done),'completed':bool(completed or attempt['completed'])})
+            if len(parts)!=3:c.close();return self.json(404,{'error':'Not found'})
+            data=json.loads(raw or b'{}'); qid=data.get('question_id'); choice=data.get('choice'); q=c.execute('SELECT * FROM questions WHERE id=? AND module_id=?',(qid,attempt['module_id'])).fetchone()
             if not attempt or not q:c.close();return self.json(404,{'error':'Question not found.'})
             correct=int(choice)==q['answer']; c.execute('INSERT INTO answers(attempt_id,question_id,choice,correct) VALUES(?,?,?,?)',(aid,qid,choice,int(correct))); c.commit(); answered=c.execute('SELECT COUNT(DISTINCT question_id) FROM answers WHERE attempt_id=?',(aid,)).fetchone()[0]; total=c.execute('SELECT COUNT(*) FROM questions WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]
-            completed=int(time.time()) if answered>=total else None; score=round(c.execute('SELECT AVG(correct)*100 FROM (SELECT MAX(correct) correct FROM answers WHERE attempt_id=? GROUP BY question_id)',(aid,)).fetchone()[0] or 0)
+            progress=c.execute('SELECT completed_lessons FROM attempt_progress WHERE attempt_id=?',(aid,)).fetchone(); total_lessons=c.execute('SELECT COUNT(*) FROM lessons WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]; done=len(json.loads(progress['completed_lessons'])) if progress else 0
+            completed=int(time.time()) if answered>=total and total_lessons and done>=total_lessons else None; score=round(c.execute('SELECT AVG(correct)*100 FROM (SELECT MAX(correct) correct FROM answers WHERE attempt_id=? GROUP BY question_id)',(aid,)).fetchone()[0] or 0)
             c.execute('UPDATE attempts SET score=?,completed=COALESCE(?,completed) WHERE id=?',(score,completed,aid));c.commit(); explanation=q['explanation'];c.close();return self.json(200,{'correct':correct,'explanation':explanation,'score':score,'completed':bool(completed)})
         self.json(404,{'error':'Not found'})
 
@@ -180,19 +238,21 @@ class Handler(BaseHTTPRequestHandler):
         elif len(parts)==4 and parts[3] in ('lessons','questions'):
             table=parts[3];items=data.get('items',[])
             if table=='lessons':
+                previous_end=-1
                 for x in items:
                     title=(x.get('title') or '').strip(); start=float(x.get('start',0));end=float(x.get('end',0))
-                    if not title or start<0 or end<start or (m['duration'] and end>m['duration']):c.close();return self.json(400,{'error':'Check each lesson title and time range.'})
+                    if not title or start<previous_end or start<0 or end<=start or (m['duration'] and end>m['duration']):c.close();return self.json(400,{'error':'Lessons need a title and valid, non-overlapping time ranges within the video.'})
+                    previous_end=end
                 for i,x in enumerate(items):
                     lid=x.get('id') or uuid.uuid4().hex
                     c.execute('INSERT INTO lessons VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,title=excluded.title,summary=excluded.summary,start=excluded.start,end=excluded.end',(lid,mid,i,(x.get('title') or '').strip(),x.get('summary',''),float(x.get('start',0)),float(x.get('end',0))))
                 ids=[x.get('id') for x in items if x.get('id')]; c.execute('DELETE FROM lessons WHERE module_id=? AND id NOT IN ('+(','.join('?'*len(ids)) if ids else "''")+')',[mid]+ids)
             else:
                 for i,x in enumerate(items):
-                    opts=x.get('options',[])
-                    if not (x.get('prompt') or '').strip() or len(opts)<2 or int(x.get('answer',-1)) not in range(len(opts)):c.close();return self.json(400,{'error':'Each question needs a prompt, options, and one correct answer.'})
+                    opts=x.get('options',[]); at=float(x.get('at',m['duration']))
+                    if not (x.get('prompt') or '').strip() or not (x.get('explanation') or '').strip() or len(opts)<2 or any(not isinstance(o,str) or not o.strip() for o in opts) or int(x.get('answer',-1)) not in range(len(opts)) or at<0 or (m['duration'] and at>m['duration']):c.close();return self.json(400,{'error':'Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.'})
                     qid=x.get('id') or uuid.uuid4().hex
-                    c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at',(qid,mid,i,x['prompt'].strip(),json.dumps(opts),int(x['answer']),x.get('explanation',''),float(x.get('at',m['duration']))))
+                    c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at',(qid,mid,i,x['prompt'].strip(),json.dumps(opts),int(x['answer']),x.get('explanation',''),at))
                 ids=[x.get('id') for x in items if x.get('id')]; c.execute('DELETE FROM questions WHERE module_id=? AND id NOT IN ('+(','.join('?'*len(ids)) if ids else "''")+')',[mid]+ids)
         else:c.close();return self.json(404,{'error':'Not found'})
         c.commit();m=module_row(c,mid);result=package(c,m,True);c.close();return self.json(200,result)
@@ -206,9 +266,12 @@ class Handler(BaseHTTPRequestHandler):
         m=module_row(c,parts[2])
         if not m or user['role']!='creator' or m['owner']!=user['id']:c.close();return self.json(403,{'error':'Creator access is required.'})
         lessons=c.execute('SELECT * FROM lessons WHERE module_id=? ORDER BY start',(m['id'],)).fetchall();qs=c.execute('SELECT * FROM questions WHERE module_id=?',(m['id'],)).fetchall()
-        if not m['title'].strip() or not lessons or not qs:c.close();return self.json(400,{'error':'Add a title, at least one lesson, and at least one quiz question before publishing.'})
+        if not m['title'].strip() or not lessons or not qs or not m['video'] or not (FILES/m['video']).is_file():c.close();return self.json(400,{'error':'Add a title, playable video, at least one lesson, and at least one valid quiz question before publishing.'})
         for i,x in enumerate(lessons):
-            if x['end']<=x['start'] or (i and x['start']<lessons[i-1]['end']):c.close();return self.json(400,{'error':'Lesson times must be valid and cannot overlap.'})
+            if x['start']<0 or x['end']<=x['start'] or (m['duration'] and x['end']>m['duration']) or (i and x['start']<lessons[i-1]['end']):c.close();return self.json(400,{'error':'Lesson times must be valid, stay within the video, and cannot overlap.'})
+        for q in qs:
+            opts=json.loads(q['options'])
+            if not q['prompt'].strip() or not q['explanation'].strip() or len(opts)<2 or any(not isinstance(o,str) or not o.strip() for o in opts) or q['answer'] not in range(len(opts)) or q['at']<0 or (m['duration'] and q['at']>m['duration']):c.close();return self.json(400,{'error':'Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.'})
         c.execute("UPDATE modules SET status='published',published_at=? WHERE id=?",(int(time.time()),m['id']));c.commit();c.close();return self.json(200,{'ok':True})
 
 if __name__=='__main__':

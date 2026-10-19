@@ -19,7 +19,7 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The app creates `trainly.sq
 | Creator | `creator@trainly.local` | `trainly` |
 | Learner | `learner@trainly.local` | `trainly` |
 
-The creator can edit the sample module, create a new module, add lessons and multiple choice questions, upload a video, publish, and review learner results. The learner can open published modules, jump between lesson ranges, answer timed questions, and see feedback. Quiz answers and scores are stored in SQLite.
+The creator can edit the sample module, create a new module, add lessons and multiple choice questions, upload a video, publish, and review learner results. The learner can open published modules, jump between lesson ranges, answer timed questions, and see feedback. Quiz answers, scores, playback position, completed lessons, and unfinished attempts are stored in SQLite so learners can resume their progress.
 
 ## Current scope
 

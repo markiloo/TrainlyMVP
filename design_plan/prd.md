@@ -72,6 +72,37 @@ Creating training material from a video takes time: someone must identify topics
 
 The first release excludes recording or editing video, automatic dubbing or translation, SCORM/LMS export, certificates, payment, public course marketplace, live classes, advanced analytics, and complex organizational role hierarchies. These can be revisited after the core conversion and learning flow works.
 
+### 4.5 Implementation status (2026-10-19)
+
+This status reflects the current local MVP in `app.py`, `static/app.js`, and `README.md`. “Partial” means a basic version exists but does not meet the full acceptance criterion. Items marked “Not started” are requirements in this PRD with no corresponding implementation in the current app. Recheck this table as work is completed.
+
+| ID | Status | Current implementation and remaining work |
+| --- | --- | --- |
+| F1 | Partial | Seeded creator and learner demo accounts, sign-in, sessions, role checks, and owner checks exist. Implement managed accounts and workspace membership/isolation. Replace plaintext passwords, add secure production session handling, and provide account administration. |
+| F2 | Partial | MP4, MOV, and WebM filename extensions and a 1 GB file-size limit are checked; uploaded files are served through an authenticated route with byte ranges. Add content/metadata validation, duration inspection and 120-minute limit, upload progress, and explicit upload/processing state. |
+| F3 | Not started | No asynchronous processing jobs, media inspection, audio extraction, transcription, generated drafts, status tracking, or retry flow. |
+| F4 | Not started | No transcript storage or editor, timestamp seeking from transcript, or caption generation/display. |
+| F5 | Partial | Creators can manually add, edit, remove, and save lessons. Add generation, 2–10 lesson limits, reordering controls, strict in-video range validation, and overlap validation while editing/saving. |
+| F6 | Partial | Creators can manually add, edit, remove, position, and reorder questions, add answer options, and select the correct answer; save and publish validate prompt, explanation, options, answer, and timestamp. Add generated questions and the 3–10 question generation limits. |
+| F7 | Partial | Creator-only publishing checks title, lesson presence, and question presence, and checks lesson range overlap. Require a playable validated video and fully valid lesson/question content. Add immutable published versions so editing a module does not change the version learners are taking or have taken. |
+| F8 | Partial | Published modules have a video player, lesson jump buttons, timed question prompts, answer feedback, and end-position questions. Add private sharing/assignment, checkpoint-safe seeking, persisted answered-checkpoint behavior, robust mobile seeking, and keyboard/screen-reader review of the overlay. |
+| F9 | Partial | Attempts, submitted answers, aggregate score, saved playback position, completed lessons, and resumption of an unfinished attempt are stored. Completion now requires every lesson to be marked complete and every question to be answered. Add configurable passing score and stronger resume/attempt handling; lessons are marked complete after their video range has been played (or selected when the module has no video). |
+| F10 | Partial | Creator results show learner attempts, status, score, and dates. Add assignments and report assigned learners who have not started; report latest score and attempt count per learner/module rather than separate undifferentiated attempts. |
+| F11 | Partial | Basic validation and error messages exist for sign-in, upload, editing, and publishing. Add actionable processing-stage failures, interrupted upload recovery, retry behavior, and preservation of creator edits across processing retries. |
+
+#### Implementation backlog
+
+The following work remains before the MVP outcome in Section 2 is met:
+
+- **Accounts and access (F1):** Implement workspace and membership records, account provisioning/invitations, secure password hashing and production session settings, and authorization tests for modules, media, and results.
+- **Upload and processing (F2–F3, F11):** Add robust upload validation and progress; inspect duration and format; create a durable background job table and worker; extract audio with FFmpeg; connect configurable transcription and text-generation adapters once the data-handling decisions in Section 10 are made; expose processing stages, failures, and safe retries.
+- **Transcript and creator review (F4–F7):** Store timestamped transcript segments; build transcript review and video seeking; generate lesson/question drafts; add lesson reordering and generation limits; validate all content; preview the learner experience; and publish immutable, versioned content.
+- **Learner flow (F8–F9):** Add assignments or private sharing, accessible captions and quiz overlays, checkpoint-safe seeking, configurable passing rules, and version-bound answers/results. Harden saved progress and attempt resumption for changed module content and interrupted/network-failed saves.
+- **Results and operations (F10 plus Section 7):** Report assigned learners and attempts clearly; add deployment on the selected FastAPI/Uvicorn stack, schema migrations, persistent storage, backup/restore, retention/deletion controls, HTTPS and secret handling, and error/processing observability.
+- **Pilot readiness (Sections 5, 7, and 8):** Review the learner flow against WCAG 2.2 AA, instrument the success measures, and run a pilot to validate the stated targets.
+
+The current app uses Python's built-in HTTP server and SQLite directly; it does not yet use the selected FastAPI, Jinja2, SQLAlchemy/Alembic, or worker architecture in [the web stack decision](./web_stack.md). Treat that stack migration as part of implementation before production deployment.
+
 ## 5. Experience and content rules
 
 - Generated content is labeled as a draft until the creator publishes it. The creator can inspect the supporting transcript and video time range for each lesson and question.
