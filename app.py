@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-import hashlib, hmac, json, os, re, secrets, sqlite3, subprocess, time, uuid
+import hashlib, hmac, json, math, os, re, secrets, sqlite3, subprocess, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -17,6 +17,7 @@ def password_hash(password):
     return f'pbkdf2_sha256${rounds}${salt.hex()}${digest}'
 
 def password_matches(password,stored):
+    if not isinstance(password,str): return False
     if not stored.startswith('pbkdf2_sha256$'): return hmac.compare_digest(password,stored)
     try:
         scheme,rounds,salt,digest=stored.split('$',3)
@@ -24,14 +25,20 @@ def password_matches(password,stored):
         return hmac.compare_digest(actual,digest)
     except (ValueError,TypeError): return False
 
+def finite_number(value,default=None):
+    try:
+        result=float(value)
+        return result if math.isfinite(result) else default
+    except (ValueError,TypeError): return default
+
 def inspect_video(path,extension):
     try:
         result=subprocess.run([os.environ.get('TRAINLY_FFPROBE','ffprobe'),'-v','error','-show_entries','format=duration,format_name','-show_entries','stream=codec_type','-of','json',str(path)],capture_output=True,text=True,timeout=30,check=True)
-        metadata=json.loads(result.stdout); duration=float(metadata['format']['duration']); formats=metadata['format']['format_name'].split(',')
+        metadata=json.loads(result.stdout); format_info=metadata.get('format',{}); duration=finite_number(format_info.get('duration')); formats=set(str(format_info.get('format_name','')).split(','))
         streams=metadata.get('streams',[])
-        valid_format=bool(set(formats)&({'.mp4':{'mov','mp4','m4a','3gp','3g2','mj2'},'.mov':{'mov','mp4','m4a','3gp','3g2','mj2'},'.webm':{'webm','matroska'}}[extension]))
+        valid_format=bool(formats&({'.mp4':{'mov','mp4','m4a','3gp','3g2','mj2'},'.mov':{'mov','mp4','m4a','3gp','3g2','mj2'},'.webm':{'webm','matroska'}}[extension]))
         if not valid_format or not any(s.get('codec_type')=='video' for s in streams): raise ValueError('The selected file is not a valid video in the chosen format.')
-        if duration<=0: raise ValueError('The video duration could not be read.')
+        if duration is None or duration<=0: raise ValueError('The video duration could not be read.')
         if duration>120*60: raise ValueError('This video is longer than the 120-minute limit.')
         return int(round(duration))
     except FileNotFoundError as e: raise ValueError('Video inspection is unavailable. Install FFprobe or set TRAINLY_FFPROBE.') from e
@@ -42,15 +49,20 @@ SCHEMA = '''
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, password TEXT, role TEXT);
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, csrf TEXT, expires INTEGER, FOREIGN KEY(user_id) REFERENCES users(id));
-CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, FOREIGN KEY(owner) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, published_version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(owner) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, title TEXT, summary TEXT, start REAL, end REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, prompt TEXT, options TEXT, answer INTEGER, explanation TEXT, at REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, module_id TEXT, learner INTEGER, started INTEGER, completed INTEGER, score INTEGER DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id));
+CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, module_id TEXT, learner INTEGER, started INTEGER, completed INTEGER, score INTEGER DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id));
 CREATE TABLE IF NOT EXISTS answers(id INTEGER PRIMARY KEY, attempt_id TEXT, question_id TEXT, choice INTEGER, correct INTEGER, FOREIGN KEY(attempt_id) REFERENCES attempts(id));
 CREATE TABLE IF NOT EXISTS attempt_progress(attempt_id TEXT PRIMARY KEY, position REAL NOT NULL DEFAULT 0, completed_lessons TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(attempt_id) REFERENCES attempts(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS module_versions(module_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot TEXT NOT NULL, video TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(module_id,version), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS assignments(module_id TEXT NOT NULL, learner INTEGER NOT NULL, assigned_at INTEGER NOT NULL, PRIMARY KEY(module_id,learner), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(learner) REFERENCES users(id) ON DELETE CASCADE);
 '''
 def db():
-    c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA); return c
+    c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA)
+    for table,column,definition in [('modules','published_version','INTEGER NOT NULL DEFAULT 0'),('attempts','version','INTEGER NOT NULL DEFAULT 0')]:
+        if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}: c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+    return c
 
 def seed():
     c=db()
@@ -66,18 +78,51 @@ def seed():
     c.commit(); c.close()
 seed()
 
+def ensure_seed_assignment():
+    c=db(); learner=c.execute("SELECT id FROM users WHERE role='learner' ORDER BY id LIMIT 1").fetchone()
+    if learner and c.execute('SELECT 1 FROM modules WHERE id=?',('workplace-safety',)).fetchone():
+        c.execute('INSERT OR IGNORE INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)',('workplace-safety',learner['id'],int(time.time())))
+    c.commit();c.close()
+
+ensure_seed_assignment()
+
 def module_row(c, mid): return c.execute('SELECT * FROM modules WHERE id=?',(mid,)).fetchone()
 def attempt_state(c, attempt):
     progress=c.execute('SELECT position,completed_lessons FROM attempt_progress WHERE attempt_id=?',(attempt['id'],)).fetchone()
     answered=[r['question_id'] for r in c.execute('SELECT DISTINCT question_id FROM answers WHERE attempt_id=?',(attempt['id'],))]
-    return dict(id=attempt['id'],position=progress['position'] if progress else 0,completed_lessons=json.loads(progress['completed_lessons']) if progress else [],answered_questions=answered,completed=bool(attempt['completed']))
+    return dict(id=attempt['id'],version=attempt['version'],position=progress['position'] if progress else 0,completed_lessons=json.loads(progress['completed_lessons']) if progress else [],answered_questions=answered,completed=bool(attempt['completed']))
 def package(c,m,include_answers=False):
     questions=[]
     for x in c.execute('SELECT * FROM questions WHERE module_id=? ORDER BY ord',(m['id'],)):
         item=dict(id=x['id'],prompt=x['prompt'],options=json.loads(x['options']),explanation=x['explanation'],at=x['at'])
         if include_answers:item['answer']=x['answer']
         questions.append(item)
-    return dict(id=m['id'],title=m['title'],description=m['description'],video=bool(m['video']),duration=m['duration'],status=m['status'],lessons=[dict(id=x['id'],title=x['title'],summary=x['summary'],start=x['start'],end=x['end']) for x in c.execute('SELECT * FROM lessons WHERE module_id=? ORDER BY ord',(m['id'],))],questions=questions)
+    return dict(id=m['id'],title=m['title'],description=m['description'],video=bool(m['video']),duration=m['duration'],status=m['status'],version=m['published_version'],lessons=[dict(id=x['id'],title=x['title'],summary=x['summary'],start=x['start'],end=x['end']) for x in c.execute('SELECT * FROM lessons WHERE module_id=? ORDER BY ord',(m['id'],))],questions=questions)
+
+def published_package(c,m,include_answers=False):
+    row=c.execute('SELECT snapshot FROM module_versions WHERE module_id=? AND version=?',(m['id'],m['published_version'])).fetchone()
+    if not row:return package(c,m,include_answers)
+    data=json.loads(row['snapshot']); data['status']='published'; data['version']=m['published_version']
+    if not include_answers:
+        for question in data['questions']: question.pop('answer',None)
+    return data
+
+def attempt_snapshot(c,attempt):
+    row=c.execute('SELECT snapshot FROM module_versions WHERE module_id=? AND version=?',(attempt['module_id'],attempt['version'])).fetchone()
+    if row:return json.loads(row['snapshot'])
+    m=module_row(c,attempt['module_id'])
+    return package(c,m,True)
+
+def ensure_published_versions():
+    c=db()
+    for m in c.execute("SELECT * FROM modules WHERE status='published' AND published_version=0").fetchall():
+        version=1; snapshot=package(c,m,True)
+        c.execute('INSERT OR IGNORE INTO module_versions(module_id,version,snapshot,video,created_at) VALUES(?,?,?,?,?)',(m['id'],version,json.dumps(snapshot),m['video'],int(time.time())))
+        c.execute('UPDATE modules SET published_version=? WHERE id=?',(version,m['id']))
+        c.execute('UPDATE attempts SET version=? WHERE module_id=? AND version=0',(version,m['id']))
+    c.commit();c.close()
+
+ensure_published_versions()
 
 class Handler(BaseHTTPRequestHandler):
     server_version='Trainly/0.1'
@@ -105,25 +150,42 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/app.css': return self.send(200,(ROOT/'static'/'app.css').read_text(encoding='utf-8'),'text/css; charset=utf-8')
         if path=='/app.js': return self.send(200,(ROOT/'static'/'app.js').read_text(encoding='utf-8'),'text/javascript; charset=utf-8')
         if path=='/api/me': return self.json(200,{'user':dict(id=user['id'],name=user['name'],email=user['email'],role=user['role']),'csrf':user['csrf']} if user else {'user':None})
+        if path=='/api/learners':
+            if not user or user['role']!='creator':return self.json(403,{'error':'Creator access is required.'})
+            c=db(); learners=[dict(id=r['id'],name=r['name'],email=r['email']) for r in c.execute("SELECT id,name,email FROM users WHERE role='learner' ORDER BY name")];c.close();return self.json(200,learners)
         if path=='/api/modules':
             if not user:return self.json(401,{'error':'Sign in to continue.'})
-            c=db(); rows=c.execute('SELECT * FROM modules WHERE status="published" OR owner=? ORDER BY published_at DESC',(user['id'],)).fetchall(); result=[]
+            c=db()
+            if user['role']=='learner': rows=c.execute('SELECT modules.* FROM modules JOIN assignments ON assignments.module_id=modules.id WHERE modules.status="published" AND assignments.learner=? ORDER BY modules.published_at DESC',(user['id'],)).fetchall()
+            else: rows=c.execute('SELECT * FROM modules WHERE status="published" OR owner=? ORDER BY published_at DESC',(user['id'],)).fetchall()
+            result=[]
             for m in rows:
-                p=package(c,m,user['role']=='creator' and m['owner']==user['id']); p['completed']=bool(c.execute('SELECT 1 FROM attempts WHERE module_id=? AND learner=? AND completed IS NOT NULL',(m['id'],user['id'])).fetchone()); result.append(p)
+                is_owner=user['role']=='creator' and m['owner']==user['id']; p=package(c,m,True) if is_owner else published_package(c,m); p['completed']=bool(c.execute('SELECT 1 FROM attempts WHERE module_id=? AND version=? AND learner=? AND completed IS NOT NULL',(m['id'],m['published_version'],user['id'])).fetchone()); result.append(p)
             c.close(); return self.json(200,result)
         if path.startswith('/api/modules/'):
             parts=path.split('/'); mid=parts[3] if len(parts)>3 else ''; c=db(); m=module_row(c,mid)
             if not m: c.close(); return self.json(404,{'error':'Module not found.'})
-            if not user or (m['status']!='published' and m['owner']!=user['id']): c.close(); return self.json(403,{'error':'You do not have access to this module.'})
+            owner=bool(user and user['role']=='creator' and m['owner']==user['id'])
+            assigned=bool(user and c.execute('SELECT 1 FROM assignments WHERE module_id=? AND learner=?',(mid,user['id'])).fetchone())
+            if not user or not owner and (m['status']!='published' or not assigned): c.close(); return self.json(403,{'error':'You do not have access to this module.'})
             if len(parts)==5 and parts[4]=='results' and user['role']=='creator' and m['owner']==user['id']:
-                rows=c.execute('SELECT attempts.*,users.name,users.email FROM attempts JOIN users ON users.id=attempts.learner WHERE attempts.module_id=? ORDER BY started DESC',(mid,)).fetchall(); c.close(); return self.json(200,[dict(name=r['name'],email=r['email'],completed=bool(r['completed']),score=r['score'],started=r['started'],completed_at=r['completed']) for r in rows])
-            result=package(c,m,user['role']=='creator' and m['owner']==user['id']); c.close(); return self.json(200,result)
+                rows=c.execute('''SELECT users.name,users.email,
+                    (SELECT score FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS score,
+                    (SELECT started FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS started,
+                    (SELECT completed FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS completed_at,
+                    (SELECT COUNT(*) FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner) AS attempt_count
+                    FROM assignments JOIN users ON users.id=assignments.learner WHERE assignments.module_id=? ORDER BY users.name''',(mid,)).fetchall(); c.close(); return self.json(200,[dict(name=r['name'],email=r['email'],completed=bool(r['completed_at']),status='completed' if r['completed_at'] else 'in_progress' if r['started'] else 'not_started',score=r['score'],started=r['started'],completed_at=r['completed_at'],attempt_count=r['attempt_count']) for r in rows])
+            result=package(c,m,True) if user['role']=='creator' and m['owner']==user['id'] else published_package(c,m); c.close(); return self.json(200,result)
         if path.startswith('/media/'):
             name=Path(path).name
             if not user: return self.send(401,'Sign in required.','text/plain')
             c=db(); row=c.execute('SELECT * FROM modules WHERE id=?',(name,)).fetchone()
             if not row or (row['owner']!=user['id'] and row['status']!='published'): c.close(); return self.send(403,'Forbidden','text/plain')
-            f=FILES/row['video']; c.close()
+            version=parse_qs(urlparse(self.path).query).get('version',[None])[0]
+            if version and row['status']=='published':
+                saved=c.execute('SELECT video FROM module_versions WHERE module_id=? AND version=?',(name,int(version))).fetchone() if version.isdigit() else None; video=saved['video'] if saved else ''
+            else: video=row['video']
+            f=FILES/video; c.close()
             if not f.exists(): return self.send(404,'Missing media','text/plain')
             size=f.stat().st_size; start,end=0,size-1; rng=self.headers.get('Range')
             if rng:
@@ -154,7 +216,8 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/logout':
             if user:
                 c=db(); c.execute('DELETE FROM sessions WHERE token=?',(user['token'],)); c.commit(); c.close()
-            return self.json(200,{'ok':True},headers={'Set-Cookie':'trainly=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'})
+            secure='; Secure' if COOKIE_SECURE else ''
+            return self.json(200,{'ok':True},headers={'Set-Cookie':f'trainly=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{secure}'})
         if not user:return self.json(401,{'error':'Sign in to continue.'})
         if self.headers.get('X-CSRF-Token')!=user['csrf']: return self.json(403,{'error':'Session expired. Refresh and try again.'})
         c=db()
@@ -169,6 +232,14 @@ class Handler(BaseHTTPRequestHandler):
             parts=path.split('/'); mid=parts[3]; m=module_row(c,mid)
             if not m: c.close(); return self.json(404,{'error':'Module not found.'})
             if user['role']!='creator' or m['owner']!=user['id']: c.close(); return self.json(403,{'error':'Creator access is required.'})
+            if len(parts)==5 and parts[4]=='assign':
+                if m['status']!='published':c.close();return self.json(400,{'error':'Publish this module before assigning learners.'})
+                try: data=json.loads(raw)
+                except: c.close();return self.json(400,{'error':'Choose a learner to assign.'})
+                email=data.get('email','')
+                learner=c.execute("SELECT id FROM users WHERE email=? AND role='learner'",(email.lower() if isinstance(email,str) else '',)).fetchone()
+                if not learner:c.close();return self.json(404,{'error':'No learner account found for that email.'})
+                c.execute('INSERT OR IGNORE INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)',(mid,learner['id'],int(time.time())));c.commit();c.close();return self.json(200,{'ok':True})
             if len(parts)==5 and parts[4]=='upload':
                 content=self.headers.get('Content-Type',''); boundary=re.search(r'boundary=(?:"([^"]+)"|([^;]+))',content)
                 if not boundary:c.close(); return self.json(400,{'error':'Choose an MP4, MOV, or WebM video.'})
@@ -189,10 +260,10 @@ class Handler(BaseHTTPRequestHandler):
             c.close();return self.json(404,{'error':'Not found'})
         if path=='/api/attempts':
             data=json.loads(raw or b'{}'); mid=data.get('module_id'); m=module_row(c,mid)
-            if not m or m['status']!='published':c.close();return self.json(404,{'error':'Published module not found.'})
-            attempt=c.execute('SELECT * FROM attempts WHERE module_id=? AND learner=? AND completed IS NULL ORDER BY started DESC LIMIT 1',(mid,user['id'])).fetchone()
+            if not m or m['status']!='published' or user['role']!='learner' or not c.execute('SELECT 1 FROM assignments WHERE module_id=? AND learner=?',(mid,user['id'])).fetchone():c.close();return self.json(404,{'error':'Assigned published module not found.'})
+            attempt=c.execute('SELECT * FROM attempts WHERE module_id=? AND learner=? AND version=? AND completed IS NULL ORDER BY started DESC LIMIT 1',(mid,user['id'],m['published_version'])).fetchone()
             if not attempt:
-                aid=uuid.uuid4().hex; c.execute('INSERT INTO attempts(id,module_id,learner,started) VALUES(?,?,?,?)',(aid,mid,user['id'],int(time.time()))); attempt=c.execute('SELECT * FROM attempts WHERE id=?',(aid,)).fetchone()
+                aid=uuid.uuid4().hex; c.execute('INSERT INTO attempts(id,module_id,learner,started,version) VALUES(?,?,?,?,?)',(aid,mid,user['id'],int(time.time()),m['published_version'])); attempt=c.execute('SELECT * FROM attempts WHERE id=?',(aid,)).fetchone()
             c.execute('INSERT OR IGNORE INTO attempt_progress(attempt_id) VALUES(?)',(attempt['id'],));c.commit();result=attempt_state(c,attempt);c.close();return self.json(200,result)
         if path.startswith('/api/attempts/'):
             parts=path.strip('/').split('/'); aid=parts[2] if len(parts)>2 else ''; attempt=c.execute('SELECT * FROM attempts WHERE id=? AND learner=?',(aid,user['id'])).fetchone()
@@ -201,21 +272,22 @@ class Handler(BaseHTTPRequestHandler):
                 data=json.loads(raw or b'{}'); progress=c.execute('SELECT position,completed_lessons FROM attempt_progress WHERE attempt_id=?',(aid,)).fetchone(); done=set(json.loads(progress['completed_lessons'])) if progress else set()
                 position=max(0,float(data.get('position',progress['position'] if progress else 0))); lesson_id=data.get('lesson_id')
                 if lesson_id:
-                    valid=c.execute('SELECT 1 FROM lessons WHERE id=? AND module_id=?',(lesson_id,attempt['module_id'])).fetchone()
-                    if not valid:c.close();return self.json(400,{'error':'Lesson not found in this module.'})
+                    snapshot=attempt_snapshot(c,attempt); valid=any(x['id']==lesson_id for x in snapshot['lessons'])
+                    if not valid:c.close();return self.json(400,{'error':'Lesson not found in this module version.'})
                     done.add(lesson_id)
                 c.execute('INSERT INTO attempt_progress(attempt_id,position,completed_lessons) VALUES(?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET position=excluded.position,completed_lessons=excluded.completed_lessons',(aid,position,json.dumps(sorted(done))))
-                total_lessons=c.execute('SELECT COUNT(*) FROM lessons WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]
+                snapshot=attempt_snapshot(c,attempt); total_lessons=len(snapshot['lessons'])
                 answered=c.execute('SELECT COUNT(DISTINCT question_id) FROM answers WHERE attempt_id=?',(aid,)).fetchone()[0]
-                total_questions=c.execute('SELECT COUNT(*) FROM questions WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]
+                total_questions=len(snapshot['questions'])
                 completed=int(time.time()) if total_lessons and len(done)>=total_lessons and total_questions and answered>=total_questions else None
                 if completed:c.execute('UPDATE attempts SET completed=? WHERE id=?',(completed,aid))
                 c.commit();c.close();return self.json(200,{'position':position,'completed_lessons':sorted(done),'completed':bool(completed or attempt['completed'])})
             if len(parts)!=3:c.close();return self.json(404,{'error':'Not found'})
-            data=json.loads(raw or b'{}'); qid=data.get('question_id'); choice=data.get('choice'); q=c.execute('SELECT * FROM questions WHERE id=? AND module_id=?',(qid,attempt['module_id'])).fetchone()
-            if not attempt or not q:c.close();return self.json(404,{'error':'Question not found.'})
-            correct=int(choice)==q['answer']; c.execute('INSERT INTO answers(attempt_id,question_id,choice,correct) VALUES(?,?,?,?)',(aid,qid,choice,int(correct))); c.commit(); answered=c.execute('SELECT COUNT(DISTINCT question_id) FROM answers WHERE attempt_id=?',(aid,)).fetchone()[0]; total=c.execute('SELECT COUNT(*) FROM questions WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]
-            progress=c.execute('SELECT completed_lessons FROM attempt_progress WHERE attempt_id=?',(aid,)).fetchone(); total_lessons=c.execute('SELECT COUNT(*) FROM lessons WHERE module_id=?',(attempt['module_id'],)).fetchone()[0]; done=len(json.loads(progress['completed_lessons'])) if progress else 0
+            data=json.loads(raw or b'{}'); qid=data.get('question_id'); choice=data.get('choice'); snapshot=attempt_snapshot(c,attempt); q=next((x for x in snapshot['questions'] if x['id']==qid),None)
+            if not q:c.close();return self.json(404,{'error':'Question not found in this module version.'})
+            if type(choice) is not int or choice not in range(len(q['options'])):c.close();return self.json(400,{'error':'Choose one of the available answers.'})
+            correct=choice==q['answer']; c.execute('INSERT INTO answers(attempt_id,question_id,choice,correct) VALUES(?,?,?,?)',(aid,qid,choice,int(correct))); c.commit(); answered=c.execute('SELECT COUNT(DISTINCT question_id) FROM answers WHERE attempt_id=?',(aid,)).fetchone()[0]; total=len(snapshot['questions'])
+            progress=c.execute('SELECT completed_lessons FROM attempt_progress WHERE attempt_id=?',(aid,)).fetchone(); total_lessons=len(snapshot['lessons']); done=len(json.loads(progress['completed_lessons'])) if progress else 0
             completed=int(time.time()) if answered>=total and total_lessons and done>=total_lessons else None; score=round(c.execute('SELECT AVG(correct)*100 FROM (SELECT MAX(correct) correct FROM answers WHERE attempt_id=? GROUP BY question_id)',(aid,)).fetchone()[0] or 0)
             c.execute('UPDATE attempts SET score=?,completed=COALESCE(?,completed) WHERE id=?',(score,completed,aid));c.commit(); explanation=q['explanation'];c.close();return self.json(200,{'correct':correct,'explanation':explanation,'score':score,'completed':bool(completed)})
         self.json(404,{'error':'Not found'})
@@ -240,8 +312,8 @@ class Handler(BaseHTTPRequestHandler):
             if table=='lessons':
                 previous_end=-1
                 for x in items:
-                    title=(x.get('title') or '').strip(); start=float(x.get('start',0));end=float(x.get('end',0))
-                    if not title or start<previous_end or start<0 or end<=start or (m['duration'] and end>m['duration']):c.close();return self.json(400,{'error':'Lessons need a title and valid, non-overlapping time ranges within the video.'})
+                    title=(x.get('title') or '').strip(); start=finite_number(x.get('start',0));end=finite_number(x.get('end',0))
+                    if not title or start is None or end is None or start<previous_end or start<0 or end<=start or (m['duration'] and end>m['duration']):c.close();return self.json(400,{'error':'Lessons need a title and valid, non-overlapping time ranges within the video.'})
                     previous_end=end
                 for i,x in enumerate(items):
                     lid=x.get('id') or uuid.uuid4().hex
@@ -249,10 +321,10 @@ class Handler(BaseHTTPRequestHandler):
                 ids=[x.get('id') for x in items if x.get('id')]; c.execute('DELETE FROM lessons WHERE module_id=? AND id NOT IN ('+(','.join('?'*len(ids)) if ids else "''")+')',[mid]+ids)
             else:
                 for i,x in enumerate(items):
-                    opts=x.get('options',[]); at=float(x.get('at',m['duration']))
-                    if not (x.get('prompt') or '').strip() or not (x.get('explanation') or '').strip() or len(opts)<2 or any(not isinstance(o,str) or not o.strip() for o in opts) or int(x.get('answer',-1)) not in range(len(opts)) or at<0 or (m['duration'] and at>m['duration']):c.close();return self.json(400,{'error':'Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.'})
+                    opts=x.get('options',[]); at=finite_number(x.get('at',m['duration'])); answer=x.get('answer',-1)
+                    if not (x.get('prompt') or '').strip() or not (x.get('explanation') or '').strip() or not isinstance(opts,list) or len(opts)<2 or any(not isinstance(o,str) or not o.strip() for o in opts) or type(answer) is not int or answer not in range(len(opts)) or at is None or at<0 or (m['duration'] and at>m['duration']):c.close();return self.json(400,{'error':'Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.'})
                     qid=x.get('id') or uuid.uuid4().hex
-                    c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at',(qid,mid,i,x['prompt'].strip(),json.dumps(opts),int(x['answer']),x.get('explanation',''),at))
+                    c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at',(qid,mid,i,x['prompt'].strip(),json.dumps(opts),answer,x.get('explanation',''),at))
                 ids=[x.get('id') for x in items if x.get('id')]; c.execute('DELETE FROM questions WHERE module_id=? AND id NOT IN ('+(','.join('?'*len(ids)) if ids else "''")+')',[mid]+ids)
         else:c.close();return self.json(404,{'error':'Not found'})
         c.commit();m=module_row(c,mid);result=package(c,m,True);c.close();return self.json(200,result)
@@ -272,7 +344,9 @@ class Handler(BaseHTTPRequestHandler):
         for q in qs:
             opts=json.loads(q['options'])
             if not q['prompt'].strip() or not q['explanation'].strip() or len(opts)<2 or any(not isinstance(o,str) or not o.strip() for o in opts) or q['answer'] not in range(len(opts)) or q['at']<0 or (m['duration'] and q['at']>m['duration']):c.close();return self.json(400,{'error':'Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.'})
-        c.execute("UPDATE modules SET status='published',published_at=? WHERE id=?",(int(time.time()),m['id']));c.commit();c.close();return self.json(200,{'ok':True})
+        version=m['published_version']+1; snapshot=package(c,m,True); snapshot['status']='published'; snapshot['version']=version
+        c.execute('INSERT INTO module_versions(module_id,version,snapshot,video,created_at) VALUES(?,?,?,?,?)',(m['id'],version,json.dumps(snapshot),m['video'],int(time.time())))
+        c.execute("UPDATE modules SET status='published',published_at=?,published_version=? WHERE id=?",(int(time.time()),version,m['id']));c.commit();c.close();return self.json(200,{'ok':True,'version':version})
 
 if __name__=='__main__':
     port=int(os.environ.get('PORT','8000')); print(f'Trainly is ready at http://127.0.0.1:{port}'); ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
