@@ -8,6 +8,8 @@
 
 **Web stack:** See [Trainly MVP web stack](./web_stack.md).
 
+**Implementation tracking:** See the [implementation checklist](./checklist.md).
+
 ## 1. Product summary
 
 Trainly turns an existing training video into a structured learning module. A creator uploads a video, reviews a generated transcript, lesson outline, and timed quiz questions, then publishes the module for learners. Learners watch the video, answer questions at selected moments, and see their completion status.
@@ -72,36 +74,11 @@ Creating training material from a video takes time: someone must identify topics
 
 The first release excludes recording or editing video, automatic dubbing or translation, SCORM/LMS export, certificates, payment, public course marketplace, live classes, advanced analytics, and complex organizational role hierarchies. These can be revisited after the core conversion and learning flow works.
 
-### 4.5 Implementation status (2026-10-19)
+### 4.5 Implementation plan
 
-This status reflects the current local MVP in `app.py`, `static/app.js`, and `README.md`. “Partial” means a basic version exists but does not meet the full acceptance criterion. Items marked “Not started” are requirements in this PRD with no corresponding implementation in the current app. Recheck this table as work is completed.
+Track completed and remaining work in the [implementation checklist](./checklist.md).
 
-| ID | Status | Current implementation and remaining work |
-| --- | --- | --- |
-| F1 | Partial | Seeded creator and learner demo accounts, sign-in, PBKDF2 password hashing (including upgrade of existing plaintext demo passwords at sign-in), sessions, role checks, and owner checks exist. Implement managed accounts and workspace membership/isolation, and use secure cookies in production by setting `TRAINLY_SECURE_COOKIE=1` behind HTTPS. |
-| F2 | Partial | MP4, MOV, and WebM uploads are inspected with FFprobe for a video stream, matching container, and duration; 1 GB and 120-minute limits are enforced. Uploaded files are served through an authenticated route with byte ranges. Add upload progress and explicit queued/processing state. |
-| F3 | Not started | No asynchronous processing jobs, media inspection, audio extraction, transcription, generated drafts, status tracking, or retry flow. |
-| F4 | Not started | No transcript storage or editor, timestamp seeking from transcript, or caption generation/display. |
-| F5 | Partial | Creators can manually add, edit, remove, reorder, and save lessons. Saves enforce chronological, non-overlapping, positive ranges inside the inspected video duration. Add generation and the 2–10 generated-lesson limits. |
-| F6 | Partial | Creators can manually add, edit, remove, position, and reorder questions, add answer options, and select the correct answer; save and publish validate prompt, explanation, options, answer, and timestamp. Add generated questions and the 3–10 question generation limits. |
-| F7 | Complete | Creator-only publishing requires a title, an uploaded playable video, at least one valid lesson, and at least one valid quiz question. Each publish saves an immutable content and video snapshot; learners and attempts stay pinned to that version until the creator republishes. |
-| F8 | Partial | Creators can assign published modules to learner accounts; learners see only assigned published modules. Playback supports lesson jumps, timed and end-position questions, answer feedback, and saved progress. Add checkpoint-safe seeking, robust mobile seeking, and a keyboard/screen-reader accessibility review. |
-| F9 | Partial | Attempts, submitted answers, aggregate score, saved playback position, completed lessons, and resumption of an unfinished attempt are stored against the published version opened by the learner. Completion now requires every lesson to be marked complete and every question to be answered. Add configurable passing score and harden saves for network failures; lessons are marked complete after their video range has been played (or selected when the module has no video). |
-| F10 | Complete | Creator results show one row per assigned learner, including learners who have not started, with latest status, score, start/completion dates, and attempt count. |
-| F11 | Partial | Basic validation and error messages exist for sign-in, upload, editing, and publishing. Add actionable processing-stage failures, interrupted upload recovery, retry behavior, and preservation of creator edits across processing retries. |
-
-#### Implementation backlog
-
-The following work remains before the MVP outcome in Section 2 is met:
-
-- **Accounts and access (F1):** Implement workspace and membership records, account provisioning/invitations, secure cookie configuration in deployment, and authorization checks for modules, media, and results.
-- **Upload and processing (F2–F3, F11):** Add upload progress; create a durable background job table and worker; extract audio with FFmpeg; connect configurable transcription and text-generation adapters once the data-handling decisions in Section 10 are made; expose processing stages, failures, and safe retries.
-- **Transcript and creator review (F4–F7):** Store timestamped transcript segments; build transcript review and video seeking; generate lesson/question drafts and enforce generated content limits; and preview the learner experience.
-- **Learner flow (F8–F9):** Add accessible captions and quiz overlays, checkpoint-safe seeking, and configurable passing rules. Harden saved progress and attempt resumption for interrupted/network-failed saves.
-- **Operations (Section 7):** Add deployment on the selected FastAPI/Uvicorn stack, schema migrations, persistent storage, backup/restore, retention/deletion controls, HTTPS and secret handling, and error/processing observability.
-- **Pilot readiness (Sections 5, 7, and 8):** Review the learner flow against WCAG 2.2 AA, instrument the success measures, and run a pilot to validate the stated targets.
-
-The current app uses Python's built-in HTTP server and SQLite directly; it does not yet use the selected FastAPI, Jinja2, SQLAlchemy/Alembic, or worker architecture in [the web stack decision](./web_stack.md). Treat that stack migration as part of implementation before production deployment.
+Migrate the current Python HTTP server to FastAPI now, before adding transcription, background jobs, or workspace accounts. Preserve the existing API paths and response shapes during the first migration so the browser interface continues to work. Move the current routes, authentication checks, upload handling, and authorized media streaming first. Introduce SQLAlchemy, Alembic, Jinja2 page rendering, and the worker in later, focused steps; they do not need to land in the same change as the HTTP migration.
 
 ## 5. Experience and content rules
 
@@ -181,7 +158,7 @@ Targets are hypotheses for a pilot, not launch guarantees. Record upload, proces
 
 ## 9. Delivery sequence
 
-1. **Foundation:** Python app, authentication and workspace roles, database schema, private video upload and playback.
+1. **Foundation:** Migrate the existing HTTP routes to FastAPI while preserving browser behavior; then add workspace roles, managed accounts, schema migrations, and private video upload and playback improvements.
 2. **Conversion:** Background processing, transcription, lesson and quiz generation, status and retry handling.
 3. **Creator review:** Transcript and module editor, preview, validation, publish and versioning.
 4. **Learner flow:** Module player, captions, timed question overlays, saved progress, assignment and results view.
