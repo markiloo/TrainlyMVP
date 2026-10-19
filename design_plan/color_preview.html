@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trainly color direction</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;700&display=swap" rel="stylesheet">
+  <style>
+    :root{--midnight:#0b1f3a;--deep:#132e50;--gold:#d8ad54;--gold-light:#e7c275;--ivory:#f7f5ef;--mist:#b9c6d6;--slate:#52647a}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--ivory);color:var(--midnight);font:300 16px/1.6 Poppins,Arial,sans-serif}
+    h1,h2,h3,strong,.button,.brand{font-weight:700}h1,h2,h3,p{margin-top:0}h1{font-size:clamp(2.2rem,5vw,4rem);line-height:1.12}h2{font-size:1.45rem;line-height:1.3}h3{font-size:1rem}
+    .shell{max-width:1180px;margin:auto;padding:50px 24px}.top{background:var(--midnight);color:var(--ivory)}
+    header{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid #ffffff26}.brand{font-size:1.45rem;letter-spacing:-.04em}.brand span{color:var(--gold)}.nav{color:var(--mist);font-size:.9rem}
+    .hero{display:grid;grid-template-columns:1.15fr .85fr;gap:48px;align-items:center;padding:72px 0 36px}.eyebrow{color:var(--gold);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:.75rem}.hero p{color:var(--mist);max-width:550px}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}.button{display:inline-block;text-decoration:none;border-radius:12px;padding:13px 20px;background:var(--gold);color:var(--midnight)}.button:hover{background:var(--gold-light)}.button.secondary{background:transparent;color:var(--ivory);border:1px solid var(--mist)}
+    .video{background:var(--deep);border:1px solid #ffffff29;border-radius:20px;padding:18px;box-shadow:0 22px 60px #0004}.screen{height:210px;border-radius:12px;background:linear-gradient(135deg,#284768,#091728);display:grid;place-items:center;color:var(--gold);font-size:3rem}.timeline{height:6px;background:#60738d;border-radius:6px;margin:18px 0 14px}.timeline span{display:block;width:62%;height:100%;background:var(--gold);border-radius:6px}.video-footer{display:flex;justify-content:space-between;color:var(--mist);font-size:.8rem}
+    main{padding:64px 0 84px}.section-head{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:20px}.section-head p{margin:0;color:var(--slate)}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.card{background:#fff;border:1px solid #dfe4e8;border-radius:18px;padding:26px;min-height:175px}.card p{color:var(--slate);font-size:.9rem}.number{font-weight:700;font-size:2rem;line-height:1.1}.progress{height:7px;background:#e4e8eb;border-radius:8px;margin-top:22px}.progress span{display:block;width:72%;height:100%;background:var(--gold);border-radius:8px}
+    .palette{display:flex;flex-wrap:wrap;gap:12px;margin-top:38px}.swatch{flex:1 1 130px;font-size:.78rem}.chip{height:48px;border-radius:10px;margin-bottom:7px;border:1px solid #0001}.swatch strong{display:block}.swatch small{color:var(--slate)}
+    a:focus-visible{outline:3px solid var(--gold-light);outline-offset:4px}
+    @media(max-width:750px){.hero{grid-template-columns:1fr;padding:52px 0 32px}main{padding-top:56px}.cards{grid-template-columns:1fr}.nav{display:none}.section-head{display:block}}
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div class="shell">
+      <header><div class="brand">trainly<span>.</span></div><div class="nav">Modules &nbsp;&nbsp; Learners &nbsp;&nbsp; Progress</div></header>
+      <div class="hero">
+        <div><div class="eyebrow">Training that stays with you</div><h1>Turn videos into learning.</h1><p>Create structured lessons, place questions right in the video, and follow every learner's progress.</p><div class="actions"><a class="button" href="#dashboard">Create a module</a><a class="button secondary" href="#palette">Explore palette</a></div></div>
+        <div class="video" aria-label="Example video player"><div class="screen" aria-hidden="true">▶</div><div class="timeline"><span></span></div><div class="video-footer"><span>Lesson 2 · Knowledge check</span><span>08:24 / 13:40</span></div></div>
+      </div>
+    </div>
+  </div>
+  <main class="shell" id="dashboard">
+    <div class="section-head"><div><div class="eyebrow">Creator dashboard</div><h2>Build with clarity</h2></div><p>A light workspace for transcripts, lessons, and results.</p></div>
+    <div class="cards"><div class="card"><h3>Video uploaded</h3><p>From source material to a reviewable draft.</p><div class="number">01</div></div><div class="card"><h3>Lessons ready</h3><p>Short sections linked to the video timeline.</p><div class="number">04</div></div><div class="card"><h3>Learner progress</h3><p>Visible completion without visual clutter.</p><div class="number">72%</div><div class="progress"><span></span></div></div></div>
+    <div class="palette" id="palette"><div class="swatch"><div class="chip" style="background:#0b1f3a"></div><strong>Midnight</strong><small>#0B1F3A</small></div><div class="swatch"><div class="chip" style="background:#132e50"></div><strong>Deep blue</strong><small>#132E50</small></div><div class="swatch"><div class="chip" style="background:#d8ad54"></div><strong>Gold</strong><small>#D8AD54</small></div><div class="swatch"><div class="chip" style="background:#e7c275"></div><strong>Light gold</strong><small>#E7C275</small></div><div class="swatch"><div class="chip" style="background:#f7f5ef"></div><strong>Warm ivory</strong><small>#F7F5EF</small></div><div class="swatch"><div class="chip" style="background:#b9c6d6"></div><strong>Mist</strong><small>#B9C6D6</small></div><div class="swatch"><div class="chip" style="background:#52647a"></div><strong>Slate</strong><small>#52647A</small></div></div>
+  </main>
+</body>
+</html>
