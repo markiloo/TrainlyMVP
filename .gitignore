@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+trainly.sqlite3
+trainly.sqlite3-shm
+trainly.sqlite3-wal
+storage/*
+!storage/.gitkeep
