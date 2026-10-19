@@ -1,22 +1,17 @@
-# Trainly Codex cloud development setup
+# TrainlyMVP scheduled Codex Cloud setup (ChatGPT account)
 
-## Schedule and behavior
-GitHub Actions cron `0 16 * * *` runs at midnight in Asia/Manila (UTC+8) the next day. GitHub scheduled workflows can start late and run only from the default branch.
+This repository is prepared for a **Codex Cloud task signed into the owner's ChatGPT account**, not an OpenAI API-key GitHub Actions workflow. There are no automated GitHub Actions jobs in this PR, and no schedule has been activated by these repository files.
 
-The agent attempts **5–7 highest-priority unchecked items** from `design_plan/checklist.md` per day, reading `design_plan/prd.md` and `design_plan/web_stack.md`. The priority is the FastAPI migration. It checks off a requirement only when finished and verified, and creates a **draft pull request** for human review, never automatic merges. Complex items may mean fewer than five are completed in a run.
+## Configure in Codex / ChatGPT Work
+1. Open Codex via your ChatGPT account and connect the GitHub repository `markiloo/TrainlyMVP`; set up a cloud environment.
+2. Where a recurring cloud automation is offered for your account and environment, schedule **daily 00:00 Asia/Manila**. Codex and ChatGPT Scheduled Tasks are distinct capabilities. If no supported Codex Cloud scheduler is available, use eligible scheduled ChatGPT Work with access to the GitHub repository and appropriate approval settings.
+3. Paste the task instructions from `.github/codex-daily-prompt.md`. Ensure the task reads `AGENTS.md` and the existing `design_plan/prd.md`, `design_plan/checklist.md`, and `design_plan/web_stack.md`.
+4. Require draft pull requests, no automatic merging or deployment, and human review before merging.
+5. Verify the first scheduled run's GitHub access, test logs, checklist changes, and actual consumption under **Settings > Usage**.
 
-## Usage and billing
-The target is 5–7 checklist items, **not** half the tokens in a ChatGPT five-hour usage window. This GitHub Actions solution uses an independently billed OpenAI API key. A four-hour run timeout is an upper-bound on runtime, not a token cap. To bound financial exposure use an API project with appropriate externally enforced spending controls; simple alerting budgets may not guarantee cutoff.
+## Goal and practical limits
+Each run **targets 5–7 fully completed checklist items**, with tests. It may legitimately finish fewer if tasks are too broad, blocked or usage is insufficient. Never check off incomplete tasks.
 
-## Activate
-This workflow is OFF unless repository Actions variable `CODEX_AUTOMATION_ENABLED` equals `true`. Before enabling:
-1. Review and merge the setup pull request.
-2. Configure repository Actions secret `OPENAI_API_KEY` with an API key associated with a billing arrangement you approve.
-3. Review Actions permissions and allow Actions to create pull requests; grant appropriate workflow token permissions.
-4. Set `CODEX_AUTOMATION_ENABLED=true` and manually run the workflow once to validate it.
-5. Inspect the draft PR, logs, cost, and tests before trusting the schedule.
+Subscription Codex and Work share your account's usage allowance; usage can be constrained by five-hour and weekly limits. A new five-hour window starts when eligible activity begins after the previous window ends, not necessarily at midnight. The subscription allowance is not a deterministic token allocation and cannot be hard-split by this repo. Do **not** provide an API key, buy credits, or enable separate API billing as part of this configuration.
 
-To stop new runs, set the variable to `false`; cancel in-progress jobs separately. Do not enter an API key in a commit or chat.
-
-## Guardrails
-The agent must not check off incomplete tasks, make irreversible deployments, change workflow/billing/secrets, or merge changes. GitHub Actions will not guarantee a run completes 5–7 items; the checklist remains the source of truth. Review the workflow and model access before enabling paid autonomous code execution.
+Scheduling and cloud execution are account- and product-feature-dependent. **This PR alone does not schedule or start any development.**
