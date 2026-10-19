@@ -1,0 +1,60 @@
+name: Midnight Codex PRD development
+on:
+  schedule:
+    # 16:00 UTC = 00:00 Asia/Manila on the next calendar day.
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: trainly-midnight-codex
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  develop:
+    # Disabled until API credential and billing are explicitly configured.
+    if: ${{ vars.CODEX_AUTOMATION_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require API key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: test -n "$OPENAI_API_KEY"
+      - name: Run Codex on 5-7 PRD checklist items
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ':workspace'
+          safety-strategy: drop-sudo
+          prompt-file: .github/codex-daily-prompt.md
+          effort: low
+      - name: Open draft pull request when changes exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes produced."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="codex/daily-$RUN_ID"
+          git switch -c "$BRANCH"
+          git add -A
+          git commit -m "chore: daily PRD checklist progress"
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=AUTHORIZATION: basic $AUTH" push origin "HEAD:refs/heads/$BRANCH"
+          gh pr create --draft --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+            --title "Daily Codex PRD progress ($RUN_ID)" \
+            --body "Automated attempt to complete 5-7 unchecked PRD checklist items. The actual number verified may be lower. Review code and test output before manually merging; auto-merge is not enabled."
