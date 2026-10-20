@@ -4,15 +4,15 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 
 ## 1. Move the existing app to FastAPI first
 
-- [ ] Replace the `BaseHTTPRequestHandler` entry point with a FastAPI app served by Uvicorn.
-- [ ] Preserve the current `/api` paths, HTTP methods, status codes, and JSON response shapes used by `static/app.js`.
-- [ ] Move sign-in, session lookup, role checks, and CSRF checks into reusable route dependencies. (F1)
-- [ ] Move module, assignment, attempt, progress, result, and publish routes without changing their existing behavior. (F1, F7–F10)
-- [ ] Use FastAPI upload handling for MP4, MOV, and WebM without buffering a full 1 GB file in memory. (F2)
-- [ ] Preserve authorization and byte range seeking on private video responses. (F2, F8)
-- [ ] Serve the existing page and static assets through the new app; introduce Jinja2 rendering when page routes need server data.
+- [x] Replace the `BaseHTTPRequestHandler` entry point with a FastAPI app served by Uvicorn.
+- [x] Preserve the browser-facing `/api` paths and JSON response shapes used by `static/app.js`.
+- [x] Move sign-in, session lookup, role checks, and CSRF checks into reusable route dependencies. (F1)
+- [x] Move module, assignment, attempt, progress, result, and publish routes to FastAPI. (F1, F7–F10)
+- [x] Use FastAPI upload handling for MP4, MOV, and WebM without buffering a full 1 GB file in memory. (F2)
+- [x] Preserve authorization and byte range seeking on private video responses. (F2, F8)
+- [x] Serve the existing page and static assets through the new app; introduce Jinja2 rendering when page routes need server data.
 - [ ] Confirm creator and learner flows against the migrated routes before adding new product features.
-- [ ] Move database access into short, explicit units of work, then introduce SQLAlchemy models and Alembic migrations in a separate step.
+- [x] Move database access into short, explicit units of work; SQLAlchemy models and Alembic migrations remain a separate step.
 
 ## 2. Accounts, workspaces, and assignments
 

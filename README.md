@@ -1,16 +1,19 @@
 # Trainly MVP
 
-Trainly turns training into a module with lessons, timed knowledge checks, and learner results. This first local MVP runs with Python's standard library and SQLite, so it needs no package install.
+Trainly turns training into a module with lessons, timed knowledge checks, and learner results. This local MVP uses FastAPI, Uvicorn, and SQLite.
 
 ## Run locally
 
-From this folder, start the server with:
+From this folder, install dependencies and start the server with:
 
 ```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
 .\venv\Scripts\python.exe app.py
 ```
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The app creates `trainly.sqlite3` and stores uploaded videos in `storage/` on first launch. Video uploads require FFprobe on `PATH` (or set `TRAINLY_FFPROBE` to its executable). Set `PORT`, `TRAINLY_DB`, or `TRAINLY_STORAGE` to change those locations. Set `TRAINLY_SECURE_COOKIE=1` when serving behind HTTPS.
+
+Run the API checks with `.\venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests`.
 
 ## Demo accounts
 
@@ -23,6 +26,6 @@ The creator can edit the sample module, create a new module, add and reorder les
 
 ## Current scope
 
-The MVP supports one local workspace with two seeded demo users. Passwords are stored with PBKDF2 hashes; existing plaintext demo passwords are upgraded when used to sign in. Module authoring and learner progress use SQLite, uploaded videos are inspected for format, video stream, and duration, and private media is served through an authenticated byte-range route. Each publish creates a versioned content and video snapshot, so learners and their attempts stay on the version they opened.
+The MVP supports one local workspace with two seeded demo users. Passwords are stored with PBKDF2 hashes; existing plaintext demo passwords are upgraded when used to sign in. Module authoring and learner progress use SQLite, uploaded videos are inspected for format, video stream, and duration, and private media is served through an authenticated byte-range route. Each publish creates a versioned content and video snapshot, so saved answers remain tied to the version used for that attempt.
 
-Automatic transcription and AI draft generation are not connected yet because the product plan leaves the provider and video data handling decision open. Creators can add that content manually. For a public deployment, the app still needs a production web framework and server, managed account and workspace membership, migrations, secure deployment configuration, and an AI/media worker.
+Automatic transcription and AI draft generation are not connected yet because the product plan leaves the provider and video data handling decision open. Creators can add that content manually. For a public deployment, the app still needs managed account and workspace membership, migrations, secure deployment configuration, and an AI/media worker.

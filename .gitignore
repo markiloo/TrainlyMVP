@@ -1,4 +1,7 @@
 __pycache__/
+.pytest_cache/
+.test_tmp*/
+pytest-cache-files-*/
 *.py[cod]
 trainly.sqlite3
 trainly.sqlite3-shm
