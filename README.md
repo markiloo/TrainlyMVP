@@ -13,7 +13,7 @@ From this folder, install dependencies and start the server with:
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The app creates `trainly.sqlite3` and stores uploaded videos in `storage/` on first launch. Video uploads require FFprobe on `PATH` (or set `TRAINLY_FFPROBE` to its executable). Set `PORT`, `TRAINLY_DB`, or `TRAINLY_STORAGE` to change those locations. Set `TRAINLY_SECURE_COOKIE=1` when serving behind HTTPS.
 
-Run the API checks with `.\venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests`.
+Run the API checks with `.\venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests`. If Node.js is installed, run the editor state check with `node tests\editor_state.test.cjs`.
 
 ## Demo accounts
 

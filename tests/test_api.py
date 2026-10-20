@@ -50,6 +50,18 @@ def test_new_items_persist_and_foreign_ids_are_rejected(setup_app):
         assert c.execute("SELECT prompt FROM questions WHERE id=?", (foreign_id,)).fetchone()[0] != "Ready?"
 
 
+def test_question_can_be_saved_before_a_lesson_or_video(setup_app):
+    _, client = setup_app
+    headers = sign_in(client, "creator@trainly.local")
+    created = client.post("/api/modules", json={"title": "Question first"}, headers=headers).json()
+    assert created["lessons"] == []
+    assert client.put(f"/api/modules/{created['id']}/lessons", json={"items": []}, headers=headers).status_code == 200
+    question = {"prompt": "What is the first step?", "options": ["Report it", "Ignore it"], "answer": 0, "explanation": "Report it promptly.", "at": 0}
+    saved = client.put(f"/api/modules/{created['id']}/questions", json={"items": [question]}, headers=headers)
+    assert saved.status_code == 200
+    assert client.get(f"/api/modules/{created['id']}").json()["questions"][0]["prompt"] == question["prompt"]
+
+
 def test_media_requires_assignment_and_supports_range(setup_app):
     api, client = setup_app
     video_name = f"test-{uuid.uuid4().hex}.mp4"

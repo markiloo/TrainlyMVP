@@ -202,7 +202,6 @@ async def create_module(request: Request, user=Depends(creator)):
     mid = uuid.uuid4().hex[:12]
     with connection() as c:
         c.execute("INSERT INTO modules(id,owner,workspace_id,title,description) VALUES(?,?,?,?,?)", (mid, user["id"], user["workspace_id"], title.strip(), data.get("description", "")))
-        c.execute("INSERT INTO lessons VALUES(?,?,?,?,?,?,?)", (uuid.uuid4().hex, mid, 0, "Introduction", "Add a short overview for learners.", 0, 0))
         return package(c, module_row(c, mid), True)
 
 
