@@ -1,6 +1,6 @@
 # Trainly MVP implementation checklist
 
-Use this checklist to track work against the [product requirements](./prd.md) and [web stack decision](./web_stack.md). Checked items describe behavior present in the local MVP as of 2026-10-19; they do not imply production readiness. Update the boxes as work lands. Requirement IDs refer to Section 4.3 of the PRD.
+Use this checklist to track work against the [product requirements](./prd.md) and [web stack decision](./web_stack.md). Checked items describe behavior present in the local MVP as of 2026-10-20; they do not imply production readiness. Update the boxes as work lands. Requirement IDs refer to Section 4.3 of the PRD.
 
 ## 1. Move the existing app to FastAPI first
 
@@ -20,10 +20,10 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Store server-side sessions in SQLite and use an HTTP-only cookie. (F1)
 - [x] Enforce creator and learner roles on existing editing and learning routes. (F1)
 - [x] Let a creator assign a published module to an existing learner by email. (F8)
-- [ ] Add workspace and membership records, with workspace roles for creators and learners. (F1)
-- [ ] Provision or invite users without relying on seeded demo accounts. (F1)
-- [ ] Scope module, assignment, attempt, result, and private media queries to the user's workspace. (F1)
-- [ ] Define the private-link versus invitation behavior after the assignment decision in PRD Section 10. (F1, F8)
+- [x] Add workspace and membership records, with workspace roles for creators and learners. (F1)
+- [x] Let creators invite new learners through one-use, seven-day links. (F1)
+- [x] Scope module, assignment, attempt, result, and private media queries to the user's workspace. (F1)
+- [x] Use assignment by email for existing learners and invitation links for new learners in the local MVP. (F1, F8)
 - [ ] Require HTTPS and secure session cookies in deployment; review session expiry and CSRF behavior. (F1)
 
 ## 3. Video intake and private playback

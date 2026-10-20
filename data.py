@@ -45,8 +45,11 @@ def inspect_video(path,extension):
 SCHEMA = '''
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, password TEXT, role TEXT);
+CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS memberships(workspace_id TEXT NOT NULL, user_id INTEGER NOT NULL UNIQUE, role TEXT NOT NULL CHECK(role IN ('creator','learner')), PRIMARY KEY(workspace_id,user_id), FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(user_id) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS invitations(token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('creator','learner')), module_id TEXT, created_by INTEGER NOT NULL, expires INTEGER NOT NULL, accepted INTEGER, FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(module_id) REFERENCES modules(id), FOREIGN KEY(created_by) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, csrf TEXT, expires INTEGER, FOREIGN KEY(user_id) REFERENCES users(id));
-CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, published_version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(owner) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, workspace_id TEXT NOT NULL DEFAULT 'local', title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, published_version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(owner) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, title TEXT, summary TEXT, start REAL, end REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, prompt TEXT, options TEXT, answer INTEGER, explanation TEXT, at REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, module_id TEXT, learner INTEGER, started INTEGER, completed INTEGER, score INTEGER DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id));
@@ -57,7 +60,7 @@ CREATE TABLE IF NOT EXISTS assignments(module_id TEXT NOT NULL, learner INTEGER 
 '''
 def db():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA)
-    for table,column,definition in [('modules','published_version','INTEGER NOT NULL DEFAULT 0'),('attempts','version','INTEGER NOT NULL DEFAULT 0')]:
+    for table,column,definition in [('modules','published_version','INTEGER NOT NULL DEFAULT 0'),('modules','workspace_id',"TEXT NOT NULL DEFAULT 'local'"),('attempts','version','INTEGER NOT NULL DEFAULT 0')]:
         if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}: c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
     return c
 
@@ -74,6 +77,16 @@ def seed():
         for i,(p,o,a,e,t) in enumerate(qs): c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),mid,i,p,json.dumps(o),a,e,t))
     c.commit(); c.close()
 seed()
+
+def ensure_workspace():
+    c=db()
+    first_install=not c.execute("SELECT 1 FROM workspaces WHERE id='local'").fetchone()
+    c.execute("INSERT OR IGNORE INTO workspaces(id,name) VALUES('local','Trainly workspace')")
+    if first_install:
+        c.execute("INSERT OR IGNORE INTO memberships(workspace_id,user_id,role) SELECT 'local',id,role FROM users WHERE role IN ('creator','learner')")
+    c.commit();c.close()
+
+ensure_workspace()
 
 def ensure_seed_assignment():
     c=db(); learner=c.execute("SELECT id FROM users WHERE role='learner' ORDER BY id LIMIT 1").fetchone()

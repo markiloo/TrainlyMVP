@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import secrets
 import time
 import uuid
@@ -70,8 +72,10 @@ def current_user(request: Request):
         return None
     with connection() as c:
         row = c.execute(
-            "SELECT users.*, sessions.token, sessions.csrf, sessions.expires "
-            "FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=?",
+            "SELECT users.*, sessions.token, sessions.csrf, sessions.expires, "
+            "memberships.workspace_id, memberships.role AS workspace_role "
+            "FROM sessions JOIN users ON users.id=sessions.user_id "
+            "JOIN memberships ON memberships.user_id=users.id WHERE token=?",
             (token,),
         ).fetchone()
         return dict(row) if row and row["expires"] >= int(time.time()) else None
@@ -90,7 +94,7 @@ def require_csrf(request: Request, user=Depends(require_user)):
 
 
 def creator(user=Depends(require_csrf)):
-    if user["role"] != "creator":
+    if user["workspace_role"] != "creator":
         fail(403, "Creator access is required.")
     return user
 
@@ -99,16 +103,18 @@ def owned_module(c, mid, user):
     m = module_row(c, mid)
     if not m:
         fail(404, "Module not found.")
-    if user["role"] != "creator" or m["owner"] != user["id"]:
+    if user["workspace_role"] != "creator" or m["workspace_id"] != user["workspace_id"] or m["owner"] != user["id"]:
         fail(403, "Creator access is required.")
     return m
 
 
 def can_view(c, m, user):
-    if user and user["role"] == "creator" and m["owner"] == user["id"]:
+    if not user or m["workspace_id"] != user["workspace_id"]:
+        return False
+    if user["workspace_role"] == "creator" and m["owner"] == user["id"]:
         return True
     return bool(
-        user and user["role"] == "learner" and m["status"] == "published"
+        user["workspace_role"] == "learner" and m["status"] == "published"
         and c.execute("SELECT 1 FROM assignments WHERE module_id=? AND learner=?", (m["id"], user["id"])).fetchone()
     )
 
@@ -141,7 +147,7 @@ async def login(request: Request):
     if not isinstance(email, str) or not isinstance(password, str):
         fail(400, "Enter your login details.")
     with connection() as c:
-        row = c.execute("SELECT * FROM users WHERE email=?", (email.lower(),)).fetchone()
+        row = c.execute("SELECT users.*, memberships.workspace_id, memberships.role AS workspace_role FROM users JOIN memberships ON memberships.user_id=users.id WHERE email=?", (email.lower(),)).fetchone()
         if not row or not password_matches(password, row["password"]):
             fail(401, "Email or password is incorrect.")
         if not row["password"].startswith("pbkdf2_sha256$"):
@@ -165,22 +171,22 @@ def logout(user=Depends(require_csrf)):
 
 @app.get("/api/learners")
 def learners(user=Depends(require_user)):
-    if user["role"] != "creator":
+    if user["workspace_role"] != "creator":
         fail(403, "Creator access is required.")
     with connection() as c:
-        return [dict(r) for r in c.execute("SELECT id,name,email FROM users WHERE role='learner' ORDER BY name")]
+        return [dict(r) for r in c.execute("SELECT users.id,users.name,users.email FROM users JOIN memberships ON memberships.user_id=users.id WHERE memberships.workspace_id=? AND memberships.role='learner' ORDER BY users.name", (user["workspace_id"],))]
 
 
 @app.get("/api/modules")
 def modules(user=Depends(require_user)):
     with connection() as c:
-        if user["role"] == "learner":
-            rows = c.execute('SELECT modules.* FROM modules JOIN assignments ON assignments.module_id=modules.id WHERE modules.status="published" AND assignments.learner=? ORDER BY modules.published_at DESC', (user["id"],)).fetchall()
+        if user["workspace_role"] == "learner":
+            rows = c.execute('SELECT modules.* FROM modules JOIN assignments ON assignments.module_id=modules.id WHERE modules.status="published" AND modules.workspace_id=? AND assignments.learner=? ORDER BY modules.published_at DESC', (user["workspace_id"], user["id"])).fetchall()
         else:
-            rows = c.execute('SELECT * FROM modules WHERE status="published" OR owner=? ORDER BY published_at DESC', (user["id"],)).fetchall()
+            rows = c.execute('SELECT * FROM modules WHERE workspace_id=? AND owner=? ORDER BY published_at DESC', (user["workspace_id"], user["id"])).fetchall()
         result = []
         for m in rows:
-            owned = user["role"] == "creator" and m["owner"] == user["id"]
+            owned = user["workspace_role"] == "creator" and m["owner"] == user["id"]
             item = package(c, m, True) if owned else published_package(c, m)
             item["completed"] = bool(c.execute("SELECT 1 FROM attempts WHERE module_id=? AND version=? AND learner=? AND completed IS NOT NULL", (m["id"], m["published_version"], user["id"])).fetchone())
             result.append(item)
@@ -195,7 +201,7 @@ async def create_module(request: Request, user=Depends(creator)):
         fail(400, "Add a module title first.")
     mid = uuid.uuid4().hex[:12]
     with connection() as c:
-        c.execute("INSERT INTO modules(id,owner,title,description) VALUES(?,?,?,?)", (mid, user["id"], title.strip(), data.get("description", "")))
+        c.execute("INSERT INTO modules(id,owner,workspace_id,title,description) VALUES(?,?,?,?,?)", (mid, user["id"], user["workspace_id"], title.strip(), data.get("description", "")))
         c.execute("INSERT INTO lessons VALUES(?,?,?,?,?,?,?)", (uuid.uuid4().hex, mid, 0, "Introduction", "Add a short overview for learners.", 0, 0))
         return package(c, module_row(c, mid), True)
 
@@ -208,7 +214,7 @@ def get_module(mid: str, user=Depends(require_user)):
             fail(404, "Module not found.")
         if not can_view(c, m, user):
             fail(403, "You do not have access to this module.")
-        return package(c, m, True) if m["owner"] == user["id"] and user["role"] == "creator" else published_package(c, m)
+        return package(c, m, True) if m["owner"] == user["id"] and user["workspace_role"] == "creator" else published_package(c, m)
 
 
 @app.get("/api/modules/{mid}/results")
@@ -232,11 +238,75 @@ async def assign(mid: str, request: Request, user=Depends(creator)):
         m = owned_module(c, mid, user)
         if m["status"] != "published":
             fail(400, "Publish this module before assigning learners.")
-        learner = c.execute("SELECT id FROM users WHERE email=? AND role='learner'", (email.lower() if isinstance(email, str) else "",)).fetchone()
+        learner = c.execute("SELECT users.id FROM users JOIN memberships ON memberships.user_id=users.id WHERE users.email=? AND memberships.workspace_id=? AND memberships.role='learner'", (email.lower() if isinstance(email, str) else "", user["workspace_id"])).fetchone()
         if not learner:
             fail(404, "No learner account found for that email.")
         c.execute("INSERT OR IGNORE INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)", (mid, learner["id"], int(time.time())))
     return {"ok": True}
+
+
+@app.post("/api/invitations", status_code=201)
+async def create_invitation(request: Request, user=Depends(creator)):
+    data = await body_json(request)
+    email = data.get("email")
+    mid = data.get("module_id")
+    if not isinstance(email, str) or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email.strip()) or not isinstance(mid, str):
+        fail(400, "Enter a learner email and choose a module.")
+    email = email.strip().lower()
+    with connection() as c:
+        module = owned_module(c, mid, user)
+        if module["status"] != "published":
+            fail(400, "Publish this module before inviting learners.")
+        if c.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+            fail(409, "An account already uses that email. Assign an existing learner instead.")
+        token = secrets.token_urlsafe(32)
+        expires = int(time.time()) + 7 * 86400
+        c.execute("INSERT INTO invitations(token_hash,workspace_id,email,role,module_id,created_by,expires) VALUES(?,?,?,?,?,?,?)", (hashlib.sha256(token.encode()).hexdigest(), user["workspace_id"], email, "learner", mid, user["id"], expires))
+    return {"token": token, "email": email, "expires": expires}
+
+
+def pending_invitation(c, token):
+    if not isinstance(token, str) or len(token) > 128:
+        fail(404, "Invitation not found.")
+    invite = c.execute("SELECT invitations.*,workspaces.name AS workspace_name,modules.title AS module_title FROM invitations JOIN workspaces ON workspaces.id=invitations.workspace_id LEFT JOIN modules ON modules.id=invitations.module_id WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+    if not invite:
+        fail(404, "Invitation not found.")
+    if invite["accepted"] or invite["expires"] < int(time.time()):
+        fail(410, "This invitation has expired or was already used.")
+    return invite
+
+
+@app.post("/api/invitations/inspect")
+async def get_invitation(request: Request):
+    data = await body_json(request)
+    with connection() as c:
+        invite = pending_invitation(c, data.get("token"))
+        return {"email": invite["email"], "workspace": invite["workspace_name"], "module": invite["module_title"], "expires": invite["expires"]}
+
+
+@app.post("/api/invitations/accept")
+async def accept_invitation(request: Request):
+    data = await body_json(request)
+    name, password = data.get("name"), data.get("password")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100 or not isinstance(password, str) or len(password) < 8:
+        fail(400, "Enter your name and a password of at least 8 characters.")
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        invite = pending_invitation(c, data.get("token"))
+        if c.execute("SELECT 1 FROM users WHERE email=?", (invite["email"],)).fetchone():
+            fail(409, "An account already uses this email.")
+        cursor = c.execute("INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)", (invite["email"], name.strip(), password_hash(password), invite["role"]))
+        user_id = cursor.lastrowid
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)", (invite["workspace_id"], user_id, invite["role"]))
+        if invite["module_id"]:
+            c.execute("INSERT INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)", (invite["module_id"], user_id, int(time.time())))
+        c.execute("UPDATE invitations SET accepted=? WHERE token_hash=?", (int(time.time()), invite["token_hash"]))
+        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+        c.execute("INSERT INTO sessions VALUES(?,?,?,?)", (token, user_id, csrf, int(time.time()) + 86400 * 14))
+        public_user = {"id": user_id, "name": name.strip(), "email": invite["email"], "role": invite["role"]}
+    response = JSONResponse({"user": public_user, "csrf": csrf})
+    response.set_cookie("trainly", token, max_age=1209600, httponly=True, samesite="lax", secure=COOKIE_SECURE)
+    return response
 
 
 @app.post("/api/modules/{mid}/upload")
@@ -383,7 +453,7 @@ async def start_attempt(request: Request, user=Depends(require_csrf)):
     mid = data.get("module_id")
     with connection() as c:
         m = module_row(c, mid)
-        if not m or user["role"] != "learner" or not can_view(c, m, user):
+        if not m or user["workspace_role"] != "learner" or not can_view(c, m, user):
             fail(404, "Assigned published module not found.")
         attempt = c.execute("SELECT * FROM attempts WHERE module_id=? AND learner=? AND version=? AND completed IS NULL ORDER BY started DESC LIMIT 1", (mid, user["id"], m["published_version"])).fetchone()
         if not attempt:
@@ -395,8 +465,8 @@ async def start_attempt(request: Request, user=Depends(require_csrf)):
 
 
 def owned_attempt(c, aid, user):
-    attempt = c.execute("SELECT * FROM attempts WHERE id=? AND learner=?", (aid, user["id"])).fetchone()
-    if not attempt or user["role"] != "learner":
+    attempt = c.execute("SELECT attempts.* FROM attempts JOIN modules ON modules.id=attempts.module_id JOIN assignments ON assignments.module_id=modules.id AND assignments.learner=attempts.learner WHERE attempts.id=? AND attempts.learner=? AND modules.workspace_id=?", (aid, user["id"], user["workspace_id"])).fetchone()
+    if not attempt or user["workspace_role"] != "learner":
         fail(404, "Attempt not found.")
     return attempt
 

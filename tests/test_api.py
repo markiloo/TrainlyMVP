@@ -54,7 +54,8 @@ def test_media_requires_assignment_and_supports_range(setup_app):
     api, client = setup_app
     video_name = f"test-{uuid.uuid4().hex}.mp4"
     with api.connection() as c:
-        c.execute("INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)", ("other@trainly.local", "Other", api.password_hash("trainly"), "learner"))
+        other_id = c.execute("INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)", ("other@trainly.local", "Other", api.password_hash("trainly"), "learner")).lastrowid
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)", ("local", other_id, "learner"))
         c.execute("UPDATE modules SET video=? WHERE id=?", (video_name, "workplace-safety"))
         c.execute("UPDATE module_versions SET video=? WHERE module_id=? AND version=1", (video_name, "workplace-safety"))
     video = api.FILES / video_name
@@ -118,3 +119,44 @@ def test_creator_publish_and_learner_completion(setup_app, monkeypatch):
     with api.connection() as c:
         video = c.execute("SELECT video FROM modules WHERE id=?", (mid,)).fetchone()[0]
     (api.FILES / video).unlink(missing_ok=True)
+
+
+def test_invitation_creates_a_learner_and_assigns_the_module(setup_app):
+    api, client = setup_app
+    headers = sign_in(client, "creator@trainly.local")
+    response = client.post("/api/invitations", json={"email": "New.Learner@example.com", "module_id": "workplace-safety"}, headers=headers)
+    assert response.status_code == 201
+    token = response.json()["token"]
+    details = client.post("/api/invitations/inspect", json={"token": token}).json()
+    assert details["email"] == "new.learner@example.com"
+    assert details["module"] == "Workplace safety essentials"
+    accepted = client.post("/api/invitations/accept", json={"token": token, "name": "New Learner", "password": "secure-pass-123"})
+    assert accepted.status_code == 200
+    assert accepted.json()["user"]["role"] == "learner"
+    assert any(m["id"] == "workplace-safety" for m in client.get("/api/modules").json())
+    assert client.post("/api/invitations/inspect", json={"token": token}).status_code == 410
+    assert client.post("/api/invitations/accept", json={"token": token, "name": "Again", "password": "secure-pass-123"}).status_code == 410
+    assert sign_in(client, "new.learner@example.com", "secure-pass-123")
+
+
+def test_workspace_membership_scopes_module_and_media_access(setup_app):
+    api, client = setup_app
+    media_name = f"test-{uuid.uuid4().hex}.mp4"
+    with api.connection() as c:
+        c.execute("INSERT INTO workspaces(id,name) VALUES(?,?)", ("other", "Other team"))
+        owner = c.execute("INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)", ("other.creator@example.com", "Other Creator", api.password_hash("secure-pass-123"), "creator")).lastrowid
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)", ("other", owner, "creator"))
+        c.execute("INSERT INTO modules(id,owner,workspace_id,title,video,duration,status,published_version) VALUES(?,?,?,?,?,?,?,?)", ("other-training", owner, "other", "Private training", media_name, 10, "published", 1))
+        c.execute("INSERT INTO module_versions(module_id,version,snapshot,video,created_at) VALUES(?,?,?,?,?)", ("other-training", 1, '{"questions":[],"lessons":[]}', media_name, 1))
+        local_learner = c.execute("SELECT id FROM users WHERE email='learner@trainly.local'").fetchone()[0]
+        c.execute("INSERT INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)", ("other-training", local_learner, 1))
+    video = api.FILES / media_name
+    video.write_bytes(b"private")
+    sign_in(client, "learner@trainly.local")
+    assert client.get("/api/modules/other-training").status_code == 403
+    assert client.get("/media/other-training?version=1").status_code == 403
+    assert client.post("/api/attempts", json={"module_id": "other-training"}, headers={"X-CSRF-Token": client.get("/api/me").json()["csrf"]}).status_code == 404
+    sign_in(client, "creator@trainly.local")
+    assert all(m["id"] != "other-training" for m in client.get("/api/modules").json())
+    assert client.get("/api/modules/other-training/results").status_code == 403
+    video.unlink(missing_ok=True)
