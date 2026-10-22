@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from data import (
     COOKIE_SECURE, FILES, ROOT, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, attempt_snapshot, attempt_state, db,
-    finite_number, inspect_video, module_row, package, password_hash,
+    finite_number, module_row, package, password_hash,
     password_matches, published_package,
 )
 
@@ -225,7 +225,13 @@ def get_module(mid: str, user=Depends(require_user)):
             fail(404, "Module not found.")
         if not can_view(c, m, user):
             fail(403, "You do not have access to this module.")
-        return package(c, m, True) if m["owner"] == user["id"] and user["workspace_role"] == "creator" else published_package(c, m)
+        if m["owner"] == user["id"] and user["workspace_role"] == "creator":
+            result = package(c, m, True)
+            if m["upload_job_id"]:
+                job = c.execute("SELECT id,state,stage,retry_count,duration,error FROM processing_jobs WHERE id=? AND module_id=?", (m["upload_job_id"], mid)).fetchone()
+                result["upload_job"] = dict(job) if job else None
+            return result
+        return published_package(c, m)
 
 
 @app.get("/api/modules/{mid}/results")
@@ -330,9 +336,11 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
     ext = Path(filename).suffix.lower()
     if ext not in (".mp4", ".mov", ".webm"):
         fail(400, "Choose an MP4, MOV, or WebM video.")
-    asset = f"{mid}-{uuid.uuid4().hex[:8]}{ext}"
+    job_id = uuid.uuid4().hex
+    asset = f"{mid}-{job_id[:12]}{ext}"
     target = FILES / asset
     size = 0
+    superseded_asset = None
     try:
         with target.open("wb") as stream:
             while chunk := await file.read(1024 * 1024):
@@ -340,19 +348,55 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
                 if size > MAX_VIDEO_BYTES:
                     fail(413, f"This video is larger than the {video_size_label()} limit.")
                 stream.write(chunk)
-        try:
-            duration = inspect_video(target, ext)
-        except ValueError as exc:
-            fail(400, str(exc))
         with connection() as c:
             owned_module(c, mid, user)
-            c.execute("UPDATE modules SET video=?,duration=? WHERE id=?", (asset, duration, mid))
+            now = int(time.time())
+            c.execute("INSERT INTO processing_jobs(id,module_id,workspace_id,asset,filename,extension,stage,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'inspection','queued',?,?)", (job_id, mid, user["workspace_id"], asset, filename, ext, now, now))
+            previous = c.execute("SELECT upload_job_id FROM modules WHERE id=?", (mid,)).fetchone()["upload_job_id"]
+            c.execute("UPDATE modules SET upload_job_id=? WHERE id=?", (job_id, mid))
+            if previous:
+                old_job = c.execute("SELECT asset,state FROM processing_jobs WHERE id=?", (previous,)).fetchone()
+                c.execute("UPDATE processing_jobs SET state='superseded',updated_at=? WHERE id=? AND state IN ('queued','failed')", (now, previous))
+                if old_job and old_job["state"] in ("queued", "failed"):
+                    superseded_asset = old_job["asset"]
     except Exception:
         target.unlink(missing_ok=True)
         raise
     finally:
         await file.close()
-    return {"ok": True, "filename": filename, "duration": duration, "message": f"Video saved and checked ({duration // 60} min). Add the lesson and quiz content below; automatic transcription will be available after an AI provider is configured."}
+    if superseded_asset:
+        (FILES / Path(superseded_asset).name).unlink(missing_ok=True)
+    return JSONResponse({"ok": True, "job_id": job_id, "state": "queued", "message": "Upload complete. Video inspection is queued."}, status_code=202)
+
+
+@app.get("/api/modules/{mid}/uploads/{job_id}")
+def upload_status(mid: str, job_id: str, user=Depends(creator)):
+    with connection() as c:
+        owned_module(c, mid, user)
+        job = c.execute("SELECT state,stage,retry_count,duration,error,filename FROM processing_jobs WHERE id=? AND module_id=? AND workspace_id=?", (job_id, mid, user["workspace_id"])).fetchone()
+        if not job:
+            fail(404, "Upload job not found.")
+        return dict(job)
+
+
+@app.post("/api/modules/{mid}/uploads/{job_id}/retry")
+def retry_upload(mid: str, job_id: str, user=Depends(creator)):
+    with connection() as c:
+        owned_module(c, mid, user)
+        job = c.execute("SELECT * FROM processing_jobs WHERE id=? AND module_id=? AND workspace_id=?", (job_id, mid, user["workspace_id"])).fetchone()
+        if not job:
+            fail(404, "Upload job not found.")
+        if job["state"] != "failed":
+            fail(409, "Only a failed video inspection can be retried.")
+        current = c.execute("SELECT upload_job_id FROM modules WHERE id=?", (mid,)).fetchone()
+        if not current or current["upload_job_id"] != job_id:
+            fail(409, "A newer upload has replaced this job. Upload the video again to retry.")
+        if not (FILES / Path(job["asset"]).name).is_file():
+            fail(410, "The uploaded file is no longer available. Upload it again.")
+        now = int(time.time())
+        c.execute("UPDATE processing_jobs SET state='queued',stage='inspection',retry_count=retry_count+1,updated_at=?,claimed_at=NULL,error=NULL WHERE id=?", (now, job_id))
+        c.execute("UPDATE modules SET upload_job_id=? WHERE id=?", (job_id, mid))
+    return {"ok": True, "state": "queued"}
 
 
 @app.get("/media/{mid}")

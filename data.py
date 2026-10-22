@@ -41,15 +41,20 @@ def finite_number(value,default=None):
     except (ValueError,TypeError): return default
 
 def inspect_video(path,extension):
+    return inspect_video_details(path, extension)['duration']
+
+def inspect_video_details(path,extension):
     try:
-        result=subprocess.run([os.environ.get('TRAINLY_FFPROBE','ffprobe'),'-v','error','-show_entries','format=duration,format_name','-show_entries','stream=codec_type','-of','json',str(path)],capture_output=True,text=True,timeout=30,check=True)
+        result=subprocess.run([os.environ.get('TRAINLY_FFPROBE','ffprobe'),'-v','error','-show_entries','format=duration,format_name','-show_entries','stream=codec_type,codec_name','-of','json',str(path)],capture_output=True,text=True,timeout=30,check=True)
         metadata=json.loads(result.stdout); format_info=metadata.get('format',{}); duration=finite_number(format_info.get('duration')); formats=set(str(format_info.get('format_name','')).split(','))
         streams=metadata.get('streams',[])
         valid_format=bool(formats&({'.mp4':{'mov','mp4','m4a','3gp','3g2','mj2'},'.mov':{'mov','mp4','m4a','3gp','3g2','mj2'},'.webm':{'webm','matroska'}}[extension]))
         if not valid_format or not any(s.get('codec_type')=='video' for s in streams): raise ValueError('The selected file is not a valid video in the chosen format.')
         if duration is None or duration<=0: raise ValueError('The video duration could not be read.')
         if duration>MAX_VIDEO_SECONDS: raise ValueError(f'This video is longer than the {MAX_VIDEO_SECONDS}-second limit.')
-        return int(round(duration))
+        video_stream=next(s for s in streams if s.get('codec_type')=='video')
+        audio_stream=next((s for s in streams if s.get('codec_type')=='audio'),None)
+        return dict(duration=int(round(duration)), container=sorted(formats), video_codec=video_stream.get('codec_name','unknown'), audio_codec=audio_stream.get('codec_name') if audio_stream else None)
     except FileNotFoundError as e: raise ValueError('Video inspection is unavailable. Install FFprobe or set TRAINLY_FFPROBE.') from e
     except subprocess.TimeoutExpired as e: raise ValueError('Video inspection took too long. Try a shorter or simpler video.') from e
     except subprocess.CalledProcessError as e: raise ValueError('The selected file could not be inspected as a video.') from e
@@ -62,20 +67,23 @@ CREATE TABLE IF NOT EXISTS memberships(workspace_id TEXT NOT NULL, user_id INTEG
 CREATE TABLE IF NOT EXISTS invitations(token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('creator','learner')), module_id TEXT, created_by INTEGER NOT NULL, expires INTEGER NOT NULL, accepted INTEGER, FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(module_id) REFERENCES modules(id), FOREIGN KEY(created_by) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, csrf TEXT, expires INTEGER, FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, workspace_id TEXT NOT NULL DEFAULT 'local', title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, published_version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(owner) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS media_assets(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, source_path TEXT NOT NULL, playback_path TEXT, container TEXT, video_codec TEXT, audio_codec TEXT, duration INTEGER, state TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, title TEXT, summary TEXT, start REAL, end REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, prompt TEXT, options TEXT, answer INTEGER, explanation TEXT, at REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, module_id TEXT, learner INTEGER, started INTEGER, completed INTEGER, score INTEGER DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id));
 CREATE TABLE IF NOT EXISTS answers(id INTEGER PRIMARY KEY, attempt_id TEXT, question_id TEXT, choice INTEGER, correct INTEGER, FOREIGN KEY(attempt_id) REFERENCES attempts(id));
 CREATE TABLE IF NOT EXISTS attempt_progress(attempt_id TEXT PRIMARY KEY, position REAL NOT NULL DEFAULT 0, completed_lessons TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(attempt_id) REFERENCES attempts(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS module_versions(module_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot TEXT NOT NULL, video TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(module_id,version), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS module_versions(module_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot TEXT NOT NULL, video TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, playback_video TEXT NOT NULL DEFAULT '', media_asset_id TEXT, PRIMARY KEY(module_id,version), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(media_asset_id) REFERENCES media_assets(id));
 CREATE TABLE IF NOT EXISTS assignments(module_id TEXT NOT NULL, learner INTEGER NOT NULL, assigned_at INTEGER NOT NULL, PRIMARY KEY(module_id,learner), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(learner) REFERENCES users(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS processing_jobs(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, workspace_id TEXT NOT NULL, asset TEXT NOT NULL, filename TEXT NOT NULL, extension TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'inspection', state TEXT NOT NULL DEFAULT 'queued', retry_count INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, claimed_at INTEGER, duration INTEGER, error TEXT, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(workspace_id) REFERENCES workspaces(id));
+CREATE INDEX IF NOT EXISTS processing_jobs_state_created ON processing_jobs(state,created_at);
 '''
 def db():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row
     c.execute('PRAGMA busy_timeout=20000')
     c.execute('PRAGMA journal_mode=WAL')
     c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA)
-    for table,column,definition in [('modules','published_version','INTEGER NOT NULL DEFAULT 0'),('modules','workspace_id',"TEXT NOT NULL DEFAULT 'local'"),('attempts','version','INTEGER NOT NULL DEFAULT 0')]:
+    for table,column,definition in [('modules','published_version','INTEGER NOT NULL DEFAULT 0'),('modules','workspace_id',"TEXT NOT NULL DEFAULT 'local'"),('modules','upload_job_id','TEXT'),('modules','playback_video',"TEXT NOT NULL DEFAULT ''"),('modules','media_asset_id','TEXT'),('module_versions','playback_video',"TEXT NOT NULL DEFAULT ''"),('module_versions','media_asset_id','TEXT'),('attempts','version','INTEGER NOT NULL DEFAULT 0')]:
         if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}: c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
     return c
 

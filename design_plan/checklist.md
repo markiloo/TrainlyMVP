@@ -32,22 +32,22 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Reject uploads over 1 GB or 120 minutes and show validation errors. (F2, F11)
 - [x] Store videos outside public static files and serve authenticated byte ranges for seeking. (F2, F8)
 - [x] Make upload size and duration limits deployment configurable. (F2)
-- [ ] Show upload progress and distinguish upload, queued, processing, ready, and failed states. Uploading, video checking, ready, and failed are visible; queued awaits the worker. (F2, F3)
+- [x] Show upload progress and distinguish upload, queued, processing, ready, and failed states. (F2, F3)
 - [x] Handle interrupted uploads so users can retry without losing module edits. (F11)
 - [ ] Store asset metadata and derived files separately from module content. (F2, F3)
 - [ ] Prepare a browser playable video when the source codec needs conversion. (F2, F8)
 
 ## 4. Durable processing and AI draft
 
-- [ ] Add a SQLite processing-job table with stage, state, retry count, timestamps, and safe error details. (F3, F11)
-- [ ] Run one separate worker that claims jobs, releases stale claims, and records each stage result. (F3)
-- [ ] Move media inspection and audio extraction into processing stages outside HTTP requests. (F3)
+- [x] Add a SQLite processing-job table with stage, state, retry count, timestamps, and safe error details. (F3, F11)
+- [x] Run one separate worker that claims jobs, releases stale claims, and records each stage result. (F3)
+- [ ] Move media inspection and audio extraction into processing stages outside HTTP requests. Video inspection runs in the worker; audio extraction is pending. (F3)
 - [ ] Select transcription and text-generation providers after the video data handling decision in PRD Section 10. (F3)
 - [ ] Add replaceable provider adapters with credentials supplied through configuration. (F3)
 - [ ] Transcribe speech into timestamped segments; report missing speech or low quality for manual review. (F3, F4)
 - [ ] Generate a proposed title, summary, 2–10 ordered lessons, and 3–10 quiz questions from the transcript. (F3, F5, F6)
 - [ ] Validate generated time ranges, answer keys, explanations, and source grounding before displaying a draft. (F5, F6)
-- [ ] Expose processing stage, failure reason, and a safe retry action without requiring another upload. (F3, F11)
+- [x] Expose processing stage, failure reason, and a safe retry action without requiring another upload. (F3, F11)
 - [ ] Keep creator edits intact when a failed generation stage is retried. (F11)
 
 ## 5. Creator review and publishing
@@ -78,7 +78,7 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 
 ## 7. Operations, privacy, and pilot readiness
 
-- [x] Configure SQLite foreign keys, write ahead logging, and a busy timeout for the API; the worker is pending.
+- [x] Configure SQLite foreign keys, write ahead logging, and a busy timeout for the API and worker.
 - [ ] Add reviewed schema migrations for existing data and future workspace, transcript, and job tables.
 - [ ] Deploy one writable Uvicorn app instance and one worker behind HTTPS with persistent database and media volumes.
 - [ ] Back up and restore both SQLite data and private media as a documented recovery procedure.
