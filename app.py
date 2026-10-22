@@ -16,13 +16,12 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from data import (
-    COOKIE_SECURE, FILES, ROOT, attempt_snapshot, attempt_state, db,
+    COOKIE_SECURE, FILES, ROOT, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, attempt_snapshot, attempt_state, db,
     finite_number, inspect_video, module_row, package, password_hash,
     password_matches, published_package,
 )
 
 app = FastAPI(title="Trainly", docs_url=None, redoc_url=None)
-MAX_VIDEO_BYTES = 1024 * 1024 * 1024
 
 
 @app.middleware("http")
@@ -49,6 +48,14 @@ def connection():
 
 def fail(status: int, message: str):
     raise HTTPException(status_code=status, detail=message)
+
+
+def video_size_label():
+    if MAX_VIDEO_BYTES >= 1024 ** 3:
+        return f"{MAX_VIDEO_BYTES / (1024 ** 3):g} GiB"
+    if MAX_VIDEO_BYTES >= 1024 ** 2:
+        return f"{MAX_VIDEO_BYTES / (1024 ** 2):g} MiB"
+    return f"{MAX_VIDEO_BYTES} bytes"
 
 
 @app.exception_handler(HTTPException)
@@ -138,6 +145,11 @@ def javascript():
 @app.get("/api/me")
 def me(user=Depends(current_user)):
     return {"user": {k: user[k] for k in ("id", "name", "email", "role")}, "csrf": user["csrf"]} if user else {"user": None}
+
+
+@app.get("/api/config")
+def config():
+    return {"max_video_bytes": MAX_VIDEO_BYTES, "max_video_seconds": MAX_VIDEO_SECONDS}
 
 
 @app.post("/api/login")
@@ -326,7 +338,7 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_VIDEO_BYTES:
-                    fail(413, "This video is larger than the 1 GB limit.")
+                    fail(413, f"This video is larger than the {video_size_label()} limit.")
                 stream.write(chunk)
         try:
             duration = inspect_video(target, ext)

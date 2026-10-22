@@ -8,6 +8,18 @@ FILES = Path(os.environ.get('TRAINLY_STORAGE', ROOT / 'storage'))
 FILES.mkdir(parents=True, exist_ok=True)
 COOKIE_SECURE = os.environ.get('TRAINLY_SECURE_COOKIE', '').lower() in ('1', 'true', 'yes')
 
+def positive_limit(name, default):
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError as exc:
+        raise ValueError(f'{name} must be a positive integer.') from exc
+    if value <= 0:
+        raise ValueError(f'{name} must be a positive integer.')
+    return value
+
+MAX_VIDEO_BYTES = positive_limit('TRAINLY_MAX_VIDEO_BYTES', 1024 * 1024 * 1024)
+MAX_VIDEO_SECONDS = positive_limit('TRAINLY_MAX_VIDEO_SECONDS', 120 * 60)
+
 def password_hash(password):
     salt=secrets.token_bytes(16); rounds=310000
     digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,rounds).hex()
@@ -36,7 +48,7 @@ def inspect_video(path,extension):
         valid_format=bool(formats&({'.mp4':{'mov','mp4','m4a','3gp','3g2','mj2'},'.mov':{'mov','mp4','m4a','3gp','3g2','mj2'},'.webm':{'webm','matroska'}}[extension]))
         if not valid_format or not any(s.get('codec_type')=='video' for s in streams): raise ValueError('The selected file is not a valid video in the chosen format.')
         if duration is None or duration<=0: raise ValueError('The video duration could not be read.')
-        if duration>120*60: raise ValueError('This video is longer than the 120-minute limit.')
+        if duration>MAX_VIDEO_SECONDS: raise ValueError(f'This video is longer than the {MAX_VIDEO_SECONDS}-second limit.')
         return int(round(duration))
     except FileNotFoundError as e: raise ValueError('Video inspection is unavailable. Install FFprobe or set TRAINLY_FFPROBE.') from e
     except subprocess.TimeoutExpired as e: raise ValueError('Video inspection took too long. Try a shorter or simpler video.') from e
@@ -59,7 +71,10 @@ CREATE TABLE IF NOT EXISTS module_versions(module_id TEXT NOT NULL, version INTE
 CREATE TABLE IF NOT EXISTS assignments(module_id TEXT NOT NULL, learner INTEGER NOT NULL, assigned_at INTEGER NOT NULL, PRIMARY KEY(module_id,learner), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(learner) REFERENCES users(id) ON DELETE CASCADE);
 '''
 def db():
-    c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA)
+    c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row
+    c.execute('PRAGMA busy_timeout=20000')
+    c.execute('PRAGMA journal_mode=WAL')
+    c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA)
     for table,column,definition in [('modules','published_version','INTEGER NOT NULL DEFAULT 0'),('modules','workspace_id',"TEXT NOT NULL DEFAULT 'local'"),('attempts','version','INTEGER NOT NULL DEFAULT 0')]:
         if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}: c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
     return c

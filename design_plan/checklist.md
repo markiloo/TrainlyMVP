@@ -31,9 +31,9 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Accept MP4, MOV, and WebM uploads and inspect container, video stream, and duration with FFprobe. (F2)
 - [x] Reject uploads over 1 GB or 120 minutes and show validation errors. (F2, F11)
 - [x] Store videos outside public static files and serve authenticated byte ranges for seeking. (F2, F8)
-- [ ] Make upload size and duration limits deployment configurable. (F2)
-- [ ] Show upload progress and distinguish upload, queued, processing, ready, and failed states. (F2, F3)
-- [ ] Handle interrupted uploads so users can retry without losing module edits. (F11)
+- [x] Make upload size and duration limits deployment configurable. (F2)
+- [ ] Show upload progress and distinguish upload, queued, processing, ready, and failed states. Uploading, video checking, ready, and failed are visible; queued awaits the worker. (F2, F3)
+- [x] Handle interrupted uploads so users can retry without losing module edits. (F11)
 - [ ] Store asset metadata and derived files separately from module content. (F2, F3)
 - [ ] Prepare a browser playable video when the source codec needs conversion. (F2, F8)
 
@@ -78,7 +78,7 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 
 ## 7. Operations, privacy, and pilot readiness
 
-- [ ] Configure SQLite foreign keys, write ahead logging, and a busy timeout for the API and worker.
+- [x] Configure SQLite foreign keys, write ahead logging, and a busy timeout for the API; the worker is pending.
 - [ ] Add reviewed schema migrations for existing data and future workspace, transcript, and job tables.
 - [ ] Deploy one writable Uvicorn app instance and one worker behind HTTPS with persistent database and media volumes.
 - [ ] Back up and restore both SQLite data and private media as a documented recovery procedure.

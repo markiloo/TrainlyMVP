@@ -62,6 +62,29 @@ def test_question_can_be_saved_before_a_lesson_or_video(setup_app):
     assert client.get(f"/api/modules/{created['id']}").json()["questions"][0]["prompt"] == question["prompt"]
 
 
+def test_upload_limit_preserves_previous_video_and_removes_partial_file(setup_app, monkeypatch):
+    api, client = setup_app
+    headers = sign_in(client, "creator@trainly.local")
+    mid = client.post("/api/modules", json={"title": "Upload retry"}, headers=headers).json()["id"]
+    monkeypatch.setattr(api, "inspect_video", lambda path, extension: 12)
+    first = client.post(f"/api/modules/{mid}/upload", files={"file": ("first.mp4", b"good", "video/mp4")}, headers=headers)
+    assert first.status_code == 200
+    with api.connection() as c:
+        original = c.execute("SELECT video FROM modules WHERE id=?", (mid,)).fetchone()[0]
+    before = set(api.FILES.glob(f"{mid}-*.mp4"))
+    monkeypatch.setattr(api, "MAX_VIDEO_BYTES", 4)
+    assert client.get("/api/config").json()["max_video_bytes"] == 4
+    failed = client.post(f"/api/modules/{mid}/upload", files={"file": ("second.mp4", b"too large", "video/mp4")}, headers=headers)
+    assert failed.status_code == 413
+    with api.connection() as c:
+        assert c.execute("SELECT video FROM modules WHERE id=?", (mid,)).fetchone()[0] == original
+    assert set(api.FILES.glob(f"{mid}-*.mp4")) == before
+    retry = client.post(f"/api/modules/{mid}/upload", files={"file": ("second.mp4", b"okay", "video/mp4")}, headers=headers)
+    assert retry.status_code == 200
+    for path in api.FILES.glob(f"{mid}-*.mp4"):
+        path.unlink()
+
+
 def test_media_requires_assignment_and_supports_range(setup_app):
     api, client = setup_app
     video_name = f"test-{uuid.uuid4().hex}.mp4"
