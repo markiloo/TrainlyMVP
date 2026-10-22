@@ -351,6 +351,7 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
         with connection() as c:
             owned_module(c, mid, user)
             now = int(time.time())
+            c.execute("INSERT INTO media_assets(id,module_id,source_path,state,created_at) VALUES(?,?,?,'queued',?)", (job_id, mid, asset, now))
             c.execute("INSERT INTO processing_jobs(id,module_id,workspace_id,asset,filename,extension,stage,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'inspection','queued',?,?)", (job_id, mid, user["workspace_id"], asset, filename, ext, now, now))
             previous = c.execute("SELECT upload_job_id FROM modules WHERE id=?", (mid,)).fetchone()["upload_job_id"]
             c.execute("UPDATE modules SET upload_job_id=? WHERE id=?", (job_id, mid))
@@ -359,6 +360,7 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
                 c.execute("UPDATE processing_jobs SET state='superseded',updated_at=? WHERE id=? AND state IN ('queued','failed')", (now, previous))
                 if old_job and old_job["state"] in ("queued", "failed"):
                     superseded_asset = old_job["asset"]
+                    c.execute("UPDATE media_assets SET state='superseded' WHERE id=?", (previous,))
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -366,6 +368,7 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
         await file.close()
     if superseded_asset:
         (FILES / Path(superseded_asset).name).unlink(missing_ok=True)
+        (FILES / f"{Path(superseded_asset).stem}-playback.mp4").unlink(missing_ok=True)
     return JSONResponse({"ok": True, "job_id": job_id, "state": "queued", "message": "Upload complete. Video inspection is queued."}, status_code=202)
 
 
@@ -387,7 +390,7 @@ def retry_upload(mid: str, job_id: str, user=Depends(creator)):
         if not job:
             fail(404, "Upload job not found.")
         if job["state"] != "failed":
-            fail(409, "Only a failed video inspection can be retried.")
+            fail(409, "Only a failed video processing job can be retried.")
         current = c.execute("SELECT upload_job_id FROM modules WHERE id=?", (mid,)).fetchone()
         if not current or current["upload_job_id"] != job_id:
             fail(409, "A newer upload has replaced this job. Upload the video again to retry.")
@@ -395,6 +398,7 @@ def retry_upload(mid: str, job_id: str, user=Depends(creator)):
             fail(410, "The uploaded file is no longer available. Upload it again.")
         now = int(time.time())
         c.execute("UPDATE processing_jobs SET state='queued',stage='inspection',retry_count=retry_count+1,updated_at=?,claimed_at=NULL,error=NULL WHERE id=?", (now, job_id))
+        c.execute("UPDATE media_assets SET state='queued' WHERE id=?", (job_id,))
         c.execute("UPDATE modules SET upload_job_id=? WHERE id=?", (job_id, mid))
     return {"ok": True, "state": "queued"}
 
@@ -409,10 +413,10 @@ def media(mid: str, request: Request, user=Depends(require_user)):
         if version is not None:
             if not version.isdigit() or m["status"] != "published":
                 fail(404, "Missing media")
-            saved = c.execute("SELECT video FROM module_versions WHERE module_id=? AND version=?", (mid, int(version))).fetchone()
-            video = saved["video"] if saved else ""
+            saved = c.execute("SELECT video,playback_video FROM module_versions WHERE module_id=? AND version=?", (mid, int(version))).fetchone()
+            video = (saved["playback_video"] or saved["video"]) if saved else ""
         else:
-            video = m["video"]
+            video = m["playback_video"] or m["video"]
         if not video:
             fail(404, "Missing media")
         target = FILES / Path(video).name
@@ -497,7 +501,7 @@ def publish(mid: str, user=Depends(creator)):
         snapshot = package(c, m, True)
         snapshot.update(status="published", version=version)
         now = int(time.time())
-        c.execute("INSERT INTO module_versions(module_id,version,snapshot,video,created_at) VALUES(?,?,?,?,?)", (mid, version, json.dumps(snapshot), m["video"], now))
+        c.execute("INSERT INTO module_versions(module_id,version,snapshot,video,created_at,playback_video,media_asset_id) VALUES(?,?,?,?,?,?,?)", (mid, version, json.dumps(snapshot), m["video"], now, m["playback_video"], m["media_asset_id"]))
         c.execute("UPDATE modules SET status='published',published_at=?,published_version=? WHERE id=?", (now, version, mid))
         return {"ok": True, "version": version}
 

@@ -34,8 +34,8 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Make upload size and duration limits deployment configurable. (F2)
 - [x] Show upload progress and distinguish upload, queued, processing, ready, and failed states. (F2, F3)
 - [x] Handle interrupted uploads so users can retry without losing module edits. (F11)
-- [ ] Store asset metadata and derived files separately from module content. (F2, F3)
-- [ ] Prepare a browser playable video when the source codec needs conversion. (F2, F8)
+- [x] Store asset metadata and derived files separately from module content. (F2, F3)
+- [x] Prepare a browser playable video when the source codec needs conversion. (F2, F8)
 
 ## 4. Durable processing and AI draft
 

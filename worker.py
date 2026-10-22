@@ -7,9 +7,9 @@ import os
 import time
 from pathlib import Path
 
-from data import FILES, db, inspect_video
+from data import FILES, db, inspect_video_details, prepare_browser_playback
 
-CLAIM_TIMEOUT_SECONDS = 15 * 60
+CLAIM_TIMEOUT_SECONDS = 6 * 60 * 60
 
 
 def safe_inspection_error(error):
@@ -21,6 +21,9 @@ def safe_inspection_error(error):
         "Video inspection is unavailable",
         "Video inspection took too long",
         "The selected file could not be inspected",
+        "Video conversion is unavailable",
+        "Video conversion took too long",
+        "Video conversion failed",
     )
     return message if message.startswith(safe_prefixes) else "The video could not be inspected. You can retry this job."
 
@@ -45,6 +48,7 @@ def claim_job():
                 "UPDATE processing_jobs SET state='processing',stage='inspection',claimed_at=?,updated_at=? WHERE id=?",
                 (now, now, job["id"]),
             )
+            c.execute("UPDATE media_assets SET state='processing' WHERE id=?", (job["id"],))
         c.commit()
         return dict(job) if job else None
     except Exception:
@@ -54,7 +58,7 @@ def claim_job():
         c.close()
 
 
-def finish_job(job, duration=None, error=None):
+def finish_job(job, details=None, playback_path=None, error=None, failed_stage='inspection'):
     """Save the result only if this job is still the module's active upload."""
     c = db()
     discard_asset = False
@@ -76,20 +80,26 @@ def finish_job(job, duration=None, error=None):
                 "UPDATE processing_jobs SET state='superseded',updated_at=?,claimed_at=NULL WHERE id=?",
                 (now, job["id"]),
             )
+            c.execute("UPDATE media_assets SET state='superseded' WHERE id=?", (job["id"],))
             discard_asset = True
         elif error:
             c.execute(
-                "UPDATE processing_jobs SET state='failed',stage='inspection',updated_at=?,claimed_at=NULL,error=? WHERE id=?",
-                (now, error, job["id"]),
+                "UPDATE processing_jobs SET state='failed',stage=?,updated_at=?,claimed_at=NULL,error=? WHERE id=?",
+                (failed_stage, now, error, job["id"]),
             )
+            c.execute("UPDATE media_assets SET state='failed' WHERE id=?", (job["id"],))
         else:
             c.execute(
-                "UPDATE modules SET video=?,duration=? WHERE id=? AND upload_job_id=?",
-                (job["asset"], duration, job["module_id"], job["id"]),
+                "UPDATE media_assets SET playback_path=?,container=?,video_codec=?,audio_codec=?,duration=?,state='ready' WHERE id=?",
+                (Path(playback_path).name, ','.join(details['container']), details['video_codec'], details['audio_codec'], details['duration'], job["id"]),
+            )
+            c.execute(
+                "UPDATE modules SET video=?,playback_video=?,media_asset_id=?,duration=? WHERE id=? AND upload_job_id=?",
+                (job["asset"], Path(playback_path).name, job["id"], details['duration'], job["module_id"], job["id"]),
             )
             c.execute(
                 "UPDATE processing_jobs SET state='ready',stage='complete',duration=?,updated_at=?,claimed_at=NULL,error=NULL WHERE id=?",
-                (duration, now, job["id"]),
+                (details['duration'], now, job["id"]),
             )
         c.commit()
     except Exception:
@@ -99,6 +109,17 @@ def finish_job(job, duration=None, error=None):
         c.close()
     if discard_asset:
         (FILES / Path(job["asset"]).name).unlink(missing_ok=True)
+        (FILES / f"{Path(job['asset']).stem}-playback.mp4").unlink(missing_ok=True)
+
+
+def set_stage(job_id, stage):
+    c = db()
+    try:
+        now = int(time.time())
+        c.execute("UPDATE processing_jobs SET stage=?,updated_at=? WHERE id=? AND state='processing'", (stage, now, job_id))
+        c.commit()
+    finally:
+        c.close()
 
 
 def process_one():
@@ -106,14 +127,18 @@ def process_one():
     if not job:
         return False
     path = FILES / Path(job["asset"]).name
+    stage = 'inspection'
     try:
-        duration = inspect_video(path, job["extension"])
+        details = inspect_video_details(path, job["extension"])
+        stage = 'conversion'
+        set_stage(job["id"], 'conversion')
+        playback_path, _converted = prepare_browser_playback(path, job["extension"], details)
     except ValueError as exc:
-        finish_job(job, error=safe_inspection_error(exc))
+        finish_job(job, error=safe_inspection_error(exc), failed_stage=stage)
     except Exception:
-        finish_job(job, error="Video inspection failed unexpectedly. You can retry this job.")
+        finish_job(job, error="Video processing failed unexpectedly. You can retry this job.", failed_stage=stage)
     else:
-        finish_job(job, duration=duration)
+        finish_job(job, details=details, playback_path=playback_path)
     return True
 
 

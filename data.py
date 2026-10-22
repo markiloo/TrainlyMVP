@@ -59,6 +59,30 @@ def inspect_video_details(path,extension):
     except subprocess.TimeoutExpired as e: raise ValueError('Video inspection took too long. Try a shorter or simpler video.') from e
     except subprocess.CalledProcessError as e: raise ValueError('The selected file could not be inspected as a video.') from e
 
+def prepare_browser_playback(path, extension, details):
+    video_codec=details['video_codec'].lower()
+    audio_codec=(details['audio_codec'] or '').lower()
+    formats=set(details['container'])
+    playable_mp4=extension=='.mp4' and 'mp4' in formats and video_codec=='h264' and audio_codec in ('', 'aac')
+    playable_webm=extension=='.webm' and video_codec in ('vp8','vp9','av1') and audio_codec in ('','opus','vorbis')
+    if playable_mp4 or playable_webm:
+        return Path(path), False
+    destination=Path(path).with_name(f'{Path(path).stem}-playback.mp4')
+    temporary=destination.with_name(f'{destination.stem}-{uuid.uuid4().hex[:8]}.tmp.mp4')
+    command=[os.environ.get('TRAINLY_FFMPEG','ffmpeg'),'-v','error','-y','-i',str(path),'-map','0:v:0','-map','0:a:0?','-c:v','libx264','-preset','veryfast','-crf','23','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k','-movflags','+faststart',str(temporary)]
+    try:
+        subprocess.run(command,capture_output=True,text=True,timeout=4*60*60,check=True)
+        temporary.replace(destination)
+        return destination, True
+    except FileNotFoundError as e:
+        raise ValueError('Video conversion is unavailable. Install FFmpeg or set TRAINLY_FFMPEG.') from e
+    except subprocess.TimeoutExpired as e:
+        raise ValueError('Video conversion took too long. Try a shorter or simpler video.') from e
+    except subprocess.CalledProcessError as e:
+        raise ValueError('Video conversion failed. Check that the uploaded video can be decoded.') from e
+    finally:
+        temporary.unlink(missing_ok=True)
+
 SCHEMA = '''
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, password TEXT, role TEXT);
