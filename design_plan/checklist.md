@@ -69,7 +69,7 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Save answers, scores, playback position, completed lessons, and resumable attempts against a published version. (F9)
 - [x] Require all lessons and questions before marking an attempt complete. (F9)
 - [x] Show each assigned learner's latest status, score, dates, and attempt count to the creator. (F10)
-- [ ] Block seeking past unanswered required checkpoints until the question is handled. (F8)
+- [x] Block seeking past unanswered required checkpoints until the question is handled. (F8)
 - [ ] Support mobile seeking and playback transitions across supported browsers. (F8)
 - [ ] Generate captions from the reviewed transcript and provide accessible caption controls. (F4, F8)
 - [ ] Make question overlays, feedback, focus movement, and keyboard controls accessible. (F8)
