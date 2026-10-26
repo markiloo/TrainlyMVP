@@ -439,7 +439,7 @@ async def update_module(mid: str, request: Request, user=Depends(creator)):
 
 @app.put("/api/modules/{mid}/{kind}")
 async def update_items(mid: str, kind: str, request: Request, user=Depends(creator)):
-    if kind not in ("lessons", "questions"):
+    if kind not in ("lessons", "questions", "transcript"):
         fail(404, "Not found")
     data = await body_json(request)
     items = data.get("items")
@@ -459,7 +459,17 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
             if existing and existing["module_id"] != mid:
                 fail(403, "This item belongs to another module.")
             ids.append(item_id)
-            if kind == "lessons":
+            if kind == "transcript":
+                start, end = finite_number(item.get("start")), finite_number(item.get("end"))
+                text = item.get("text")
+                if start is None or end is None or start < 0 or end <= start or (m["duration"] and end > m["duration"]) or not isinstance(text, str) or not text.strip():
+                    fail(400, "Transcript segments need text and valid time ranges within the video.")
+                origin = item.get("origin", "manual")
+                if origin not in ("manual", "generated"):
+                    origin = "manual"
+                edited = int(bool(item.get("edited", origin == "manual")))
+                c.execute("INSERT INTO transcript_segments(id,module_id,ord,start,end,text,origin,edited) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,start=excluded.start,end=excluded.end,text=excluded.text,edited=excluded.edited", (item_id, mid, i, start, end, text.strip(), origin, edited))
+            elif kind == "lessons":
                 title = item.get("title")
                 start, end = finite_number(item.get("start")), finite_number(item.get("end"))
                 if not isinstance(title, str) or not title.strip() or start is None or end is None or start < previous_end or start < 0 or end <= start or (m["duration"] and end > m["duration"]):

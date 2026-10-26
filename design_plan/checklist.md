@@ -57,10 +57,10 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Add, remove, reorder, and edit questions, answers, explanations, and timestamps. (F6)
 - [x] Validate required title, video, lesson, and question data before creator-only publishing. (F7)
 - [x] Save an immutable content and video snapshot for each published version. (F7)
-- [ ] Store and edit timestamped transcript segments, including their origin and edit state. (F4)
-- [ ] Let creators seek the video from a transcript segment or a question timestamp. (F4, F6)
+- [x] Store and edit timestamped transcript segments, including their origin and edit state. (F4) Manual segments are supported; generated segments can be represented and marked for review.
+- [x] Let creators seek the video from a transcript segment or a question timestamp. (F4, F6) Use Preview learner view to jump to transcript segments, lesson starts, and question timestamps.
 - [ ] Show which lesson and question text came from generation and requires review. (F4–F6)
-- [ ] Provide a learner preview before publishing. (F7)
+- [x] Provide a learner preview before publishing. (F7) The preview reads the saved draft and does not create learner attempts.
 - [x] Keep draft edits separate from the currently published version through republishing. (F7)
 
 ## 6. Learner experience, progress, and results

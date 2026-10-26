@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, workspace
 CREATE TABLE IF NOT EXISTS media_assets(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, source_path TEXT NOT NULL, playback_path TEXT, container TEXT, video_codec TEXT, audio_codec TEXT, duration INTEGER, state TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, title TEXT, summary TEXT, start REAL, end REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, prompt TEXT, options TEXT, answer INTEGER, explanation TEXT, at REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS transcript_segments(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, ord INTEGER NOT NULL, start REAL NOT NULL, end REAL NOT NULL, text TEXT NOT NULL, origin TEXT NOT NULL DEFAULT 'manual', edited INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, module_id TEXT, learner INTEGER, started INTEGER, completed INTEGER, score INTEGER DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id));
 CREATE TABLE IF NOT EXISTS answers(id INTEGER PRIMARY KEY, attempt_id TEXT, question_id TEXT, choice INTEGER, correct INTEGER, FOREIGN KEY(attempt_id) REFERENCES attempts(id));
 CREATE TABLE IF NOT EXISTS attempt_progress(attempt_id TEXT PRIMARY KEY, position REAL NOT NULL DEFAULT 0, completed_lessons TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(attempt_id) REFERENCES attempts(id) ON DELETE CASCADE);
@@ -154,7 +155,8 @@ def package(c,m,include_answers=False):
         item=dict(id=x['id'],prompt=x['prompt'],options=json.loads(x['options']),explanation=x['explanation'],at=x['at'])
         if include_answers:item['answer']=x['answer']
         questions.append(item)
-    return dict(id=m['id'],title=m['title'],description=m['description'],video=bool(m['video']),duration=m['duration'],status=m['status'],version=m['published_version'],lessons=[dict(id=x['id'],title=x['title'],summary=x['summary'],start=x['start'],end=x['end']) for x in c.execute('SELECT * FROM lessons WHERE module_id=? ORDER BY ord',(m['id'],))],questions=questions)
+    transcript=[dict(id=x['id'],start=x['start'],end=x['end'],text=x['text'],origin=x['origin'],edited=bool(x['edited'])) for x in c.execute('SELECT * FROM transcript_segments WHERE module_id=? ORDER BY ord',(m['id'],))]
+    return dict(id=m['id'],title=m['title'],description=m['description'],video=bool(m['video']),duration=m['duration'],status=m['status'],version=m['published_version'],lessons=[dict(id=x['id'],title=x['title'],summary=x['summary'],start=x['start'],end=x['end']) for x in c.execute('SELECT * FROM lessons WHERE module_id=? ORDER BY ord',(m['id'],))],questions=questions,transcript=transcript)
 
 def published_package(c,m,include_answers=False):
     row=c.execute('SELECT snapshot FROM module_versions WHERE module_id=? AND version=?',(m['id'],m['published_version'])).fetchone()
