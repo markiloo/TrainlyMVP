@@ -26,6 +26,25 @@ def sign_in(client, email, password="trainly"):
     return {"X-CSRF-Token": response.json()["csrf"]}
 
 
+def test_learner_can_reset_video_demo_progress(setup_app):
+    _, client = setup_app
+    learner = sign_in(client, "learner@trainly.local")
+    mid = "ltspice-models-demo"
+    module = client.get(f"/api/modules/{mid}").json()
+    attempt = client.post("/api/attempts", json={"module_id": mid}, headers=learner).json()
+    assert client.post(f"/api/attempts/{attempt['id']}/progress", json={"position": 125, "lesson_id": module["lessons"][0]["id"]}, headers=learner).status_code == 200
+    assert client.post(f"/api/attempts/{attempt['id']}", json={"question_id": module["questions"][0]["id"], "choice": 0}, headers=learner).status_code == 200
+    assert client.post(f"/api/modules/{mid}/reset-progress", headers=learner).status_code == 200
+    fresh = client.post("/api/attempts", json={"module_id": mid}, headers=learner).json()
+    assert fresh["id"] != attempt["id"]
+    assert fresh["position"] == 0
+    assert fresh["completed_lessons"] == []
+    assert fresh["answered_questions"] == []
+    assert client.post(f"/api/attempts/{attempt['id']}/progress", json={"position": 1}, headers=learner).status_code == 404
+    creator = sign_in(client, "creator@trainly.local")
+    assert client.post(f"/api/modules/{mid}/reset-progress", headers=creator).status_code == 404
+
+
 def test_new_items_persist_and_foreign_ids_are_rejected(setup_app):
     api, client = setup_app
     headers = sign_in(client, "creator@trainly.local")

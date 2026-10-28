@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-import hashlib, hmac, json, math, os, secrets, sqlite3, subprocess, time, uuid
+import hashlib, hmac, json, math, os, secrets, shutil, sqlite3, subprocess, time, uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -182,3 +182,51 @@ def ensure_published_versions():
     c.commit();c.close()
 
 ensure_published_versions()
+
+def ensure_video_demo():
+    """Make the bundled video a ready-to-play module in existing and fresh demos."""
+    source = ROOT / 'vids' / 'sample vid.mp4'
+    if not source.is_file():
+        return
+    target = FILES / 'ltspice-models-demo.mp4'
+    if not target.is_file() or target.stat().st_size != source.stat().st_size:
+        shutil.copyfile(source, target)
+    c = db()
+    try:
+        mid = 'ltspice-models-demo'
+        if c.execute('SELECT 1 FROM modules WHERE id=?', (mid,)).fetchone():
+            return
+        owner = c.execute("SELECT id FROM users WHERE email='creator@trainly.local'").fetchone()
+        learner = c.execute("SELECT id FROM users WHERE email='learner@trainly.local'").fetchone()
+        if not owner:
+            return
+        duration = 634
+        now = int(time.time())
+        c.execute('INSERT INTO modules(id,owner,workspace_id,title,description,video,playback_video,duration,status,published_at,published_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                  (mid, owner['id'], 'local', 'LTspice model walkthrough', 'Follow a hands-on walkthrough of finding and using component simulation models.', target.name, target.name, duration, 'published', now, 1))
+        lessons = [
+            ('Find the model', 'Locate a component simulation model from the manufacturer.', 0, 190),
+            ('Add model files', 'Place and inspect the downloaded model files.', 190, 380),
+            ('Run the simulation', 'Connect the model in LTspice and inspect the waveform.', 380, 510),
+            ('Review the model', 'Open the model text and check its subcircuit definition.', 510, duration),
+        ]
+        for i, (title, summary, start, end) in enumerate(lessons):
+            c.execute('INSERT INTO lessons VALUES(?,?,?,?,?,?,?)', (f'{mid}-lesson-{i+1}', mid, i, title, summary, start, end))
+        questions = [
+            ('What is the presenter looking for on the manufacturer site?', ['A simulation model', 'A purchase receipt', 'A firmware update'], 0, 'The walkthrough starts by locating a component simulation model.', 125),
+            ('Why keep the downloaded model file accessible?', ['So LTspice can reference it', 'To change the screen resolution', 'To remove the circuit ground'], 0, 'The simulator needs access to the model file used by the circuit.', 275),
+            ('What does the plotted trace help you inspect?', ['The simulated circuit response', 'The file manager layout', 'The browser download history'], 0, 'The waveform shows the circuit response produced by the simulation.', 425),
+            ('What text identifies a reusable circuit model definition?', ['A .SUBCKT declaration', 'A browser cookie notice', 'A video timestamp'], 0, 'A .SUBCKT declaration begins a SPICE subcircuit model.', 560),
+        ]
+        for i, (prompt, options, answer, explanation, at) in enumerate(questions):
+            c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?)', (f'{mid}-question-{i+1}', mid, i, prompt, json.dumps(options), answer, explanation, at))
+        snapshot = package(c, module_row(c, mid), True)
+        c.execute('INSERT INTO module_versions(module_id,version,snapshot,video,created_at,playback_video) VALUES(?,?,?,?,?,?)',
+                  (mid, 1, json.dumps(snapshot), target.name, now, target.name))
+        if learner:
+            c.execute('INSERT OR IGNORE INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)', (mid, learner['id'], now))
+        c.commit()
+    finally:
+        c.close()
+
+ensure_video_demo()

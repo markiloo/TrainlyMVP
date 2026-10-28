@@ -516,6 +516,22 @@ def publish(mid: str, user=Depends(creator)):
         return {"ok": True, "version": version}
 
 
+@app.post("/api/modules/{mid}/reset-progress")
+def reset_progress(mid: str, user=Depends(require_csrf)):
+    with connection() as c:
+        m = module_row(c, mid)
+        if not m or user["workspace_role"] != "learner" or not can_view(c, m, user):
+            fail(404, "Assigned published module not found.")
+        attempt_ids = [row["id"] for row in c.execute(
+            "SELECT id FROM attempts WHERE module_id=? AND learner=?", (mid, user["id"])
+        )]
+        for aid in attempt_ids:
+            c.execute("DELETE FROM answers WHERE attempt_id=?", (aid,))
+            c.execute("DELETE FROM attempt_progress WHERE attempt_id=?", (aid,))
+        c.execute("DELETE FROM attempts WHERE module_id=? AND learner=?", (mid, user["id"]))
+    return {"ok": True}
+
+
 @app.post("/api/attempts")
 async def start_attempt(request: Request, user=Depends(require_csrf)):
     data = await body_json(request)
