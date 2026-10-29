@@ -26,6 +26,13 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Use assignment by email for existing learners and invitation links for new learners in the local MVP. (F1, F8)
 - [ ] Require HTTPS and secure session cookies in deployment; review session expiry and CSRF behavior. (F1)
 
+### Admin account creation
+
+- [ ] Add an `/admin` entry point where an admin account can sign in and access an account-management page. (F1)
+- [ ] Add an admin role and protect the `/admin` page and its account-creation API so creator and learner accounts cannot use them. (F1)
+- [ ] Let admins create creator and learner accounts, assign each to a workspace, and validate required details and duplicate email addresses. (F1)
+- [ ] Provide a secure first-sign-in flow for new accounts, without displaying or storing plaintext passwords. (F1)
+
 ## 3. Video intake and private playback
 
 - [x] Accept MP4, MOV, and WebM uploads and inspect container, video stream, and duration with FFprobe. (F2)
@@ -62,6 +69,13 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Show which lesson and question text came from generation and requires review. (F4–F6) Generated lessons, questions, and transcript segments are labeled in the editor and shown in the draft review panel.
 - [x] Provide a learner preview before publishing. (F7) The preview reads the saved draft and does not create learner attempts.
 - [x] Keep draft edits separate from the currently published version through republishing. (F7)
+
+### Rework knowledge-check placement in the module editor
+
+- [ ] Let creators play and scrub the module video in the editor, then insert a knowledge check at the current playhead position instead of typing a timestamp. (F6)
+- [ ] Show knowledge-check markers on the video timeline so creators can find, select, and reposition existing checks by scrubbing to a new point. (F6)
+- [ ] Open the question editor for the selected check, preserving its question, answers, and explanation when its position changes. (F6)
+- [ ] Save the chosen video position as the check timestamp, validate it against the video duration and lesson ranges, and show the resulting interruption in learner preview. (F6, F7)
 
 ## 6. Learner experience, progress, and results
 
