@@ -234,6 +234,25 @@ def get_module(mid: str, user=Depends(require_user)):
         return published_package(c, m)
 
 
+@app.delete("/api/modules/{mid}", status_code=204)
+def delete_module(mid: str, user=Depends(creator)):
+    with connection() as c:
+        owned_module(c, mid, user)
+        paths = set()
+        for row in c.execute("SELECT source_path,playback_path FROM media_assets WHERE module_id=?", (mid,)):
+            paths.update(value for value in row if value)
+        for row in c.execute("SELECT asset FROM processing_jobs WHERE module_id=?", (mid,)):
+            paths.add(row["asset"])
+        c.execute("DELETE FROM invitations WHERE module_id=?", (mid,))
+        c.execute("DELETE FROM answers WHERE attempt_id IN (SELECT id FROM attempts WHERE module_id=?)", (mid,))
+        c.execute("DELETE FROM attempt_progress WHERE attempt_id IN (SELECT id FROM attempts WHERE module_id=?)", (mid,))
+        c.execute("DELETE FROM attempts WHERE module_id=?", (mid,))
+        c.execute("DELETE FROM module_versions WHERE module_id=?", (mid,))
+        c.execute("DELETE FROM modules WHERE id=?", (mid,))
+    for name in paths:
+        (FILES / Path(name).name).unlink(missing_ok=True)
+
+
 @app.get("/api/modules/{mid}/results")
 def results(mid: str, user=Depends(require_user)):
     with connection() as c:
@@ -447,6 +466,7 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
         fail(400, "Check the saved details.")
     with connection() as c:
         m = owned_module(c, mid, user)
+        table = "transcript_segments" if kind == "transcript" else kind
         ids = []
         previous_end = -1
         for i, item in enumerate(items):
@@ -455,7 +475,7 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
             item_id = item.get("id") or uuid.uuid4().hex
             if not isinstance(item_id, str) or item_id in ids:
                 fail(400, "Duplicate or invalid item ID.")
-            existing = c.execute(f"SELECT module_id FROM {kind} WHERE id=?", (item_id,)).fetchone()
+            existing = c.execute(f"SELECT module_id FROM {table} WHERE id=?", (item_id,)).fetchone()
             if existing and existing["module_id"] != mid:
                 fail(403, "This item belongs to another module.")
             ids.append(item_id)
@@ -486,9 +506,9 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
                 c.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at", (item_id, mid, i, prompt.strip(), json.dumps(options), answer, explanation, at))
         if ids:
             placeholders = ",".join("?" for _ in ids)
-            c.execute(f"DELETE FROM {kind} WHERE module_id=? AND id NOT IN ({placeholders})", [mid, *ids])
+            c.execute(f"DELETE FROM {table} WHERE module_id=? AND id NOT IN ({placeholders})", [mid, *ids])
         else:
-            c.execute(f"DELETE FROM {kind} WHERE module_id=?", (mid,))
+            c.execute(f"DELETE FROM {table} WHERE module_id=?", (mid,))
         return package(c, module_row(c, mid), True)
 
 
