@@ -6,3 +6,8 @@
 .upload-zone #upload-status{margin:9px 0 0}
 .upload-zone #upload-status:empty{display:none}
 .upload-zone .upload-error{color:var(--red)}
+.app-modal{border:0;border-radius:16px;padding:28px;width:min(440px,calc(100vw - 32px));box-shadow:0 24px 80px #0005;color:var(--ink,#24323a)}
+.app-modal::backdrop{background:#16212ab3}
+.app-modal h2{margin:0 0 18px}
+.app-modal .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+.app-modal .modal-error{color:#a32626;margin:12px 0 0}

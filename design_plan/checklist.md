@@ -76,7 +76,14 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [ ] Add a per-module passing score, defaulting to 70%, and settle whether passing is required for completion. (F9)
 - [ ] Retry or reconcile failed progress saves without losing a learner's place or duplicating answers. (F9, F11)
 
-## 7. Operations, privacy, and pilot readiness
+## 7. Replace browser prompts with app modals
+
+- [ ] Replace the module-title prompt with a create-module modal that validates the title and shows API errors in context.
+- [ ] Replace the learner-email prompt with an assignment modal that validates the email and preserves it if the request fails.
+- [ ] Replace the invitation-link prompt with a share modal that displays the link, its seven-day expiry, and a copy action.
+- [ ] Give each modal a clear title and cancel action; move focus into it when opened, keep keyboard focus inside it, support Escape, and return focus to the triggering control when closed.
+
+## 8. Operations, privacy, and pilot readiness
 
 - [x] Configure SQLite foreign keys, write ahead logging, and a busy timeout for the API and worker.
 - [ ] Add reviewed schema migrations for existing data and future workspace, transcript, and job tables.
