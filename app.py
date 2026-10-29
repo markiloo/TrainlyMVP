@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -13,20 +14,27 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from data import (
-    COOKIE_SECURE, FILES, ROOT, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, attempt_snapshot, attempt_state, db,
-    finite_number, module_row, package, password_hash,
-    password_matches, published_package,
+    COOKIE_SECURE, FILES, ROOT, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, attempt_snapshot, attempt_state, captions_vtt, db,
+    finite_number, generated_draft, module_row, package, password_hash,
+    password_matches, published_package, record_event,
 )
+from providers import ai_status
 
 app = FastAPI(title="Trainly", docs_url=None, redoc_url=None)
+logger = logging.getLogger("trainly")
 
 
 @app.middleware("http")
 async def response_headers(request: Request, call_next):
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Never log request bodies, video paths, or transcript content here.
+        logger.exception("Request failed: %s %s", request.method, request.url.path)
+        raise
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
@@ -106,6 +114,12 @@ def creator(user=Depends(require_csrf)):
     return user
 
 
+def creator_read(user=Depends(require_user)):
+    if user["workspace_role"] != "creator":
+        fail(403, "Creator access is required.")
+    return user
+
+
 def owned_module(c, mid, user):
     m = module_row(c, mid)
     if not m:
@@ -149,7 +163,7 @@ def me(user=Depends(current_user)):
 
 @app.get("/api/config")
 def config():
-    return {"max_video_bytes": MAX_VIDEO_BYTES, "max_video_seconds": MAX_VIDEO_SECONDS}
+    return {"max_video_bytes": MAX_VIDEO_BYTES, "max_video_seconds": MAX_VIDEO_SECONDS, "default_pass_score": 70, **ai_status()}
 
 
 @app.post("/api/login")
@@ -165,6 +179,7 @@ async def login(request: Request):
         if not row["password"].startswith("pbkdf2_sha256$"):
             c.execute("UPDATE users SET password=? WHERE id=?", (password_hash(password), row["id"]))
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+        c.execute("DELETE FROM sessions WHERE expires<?", (int(time.time()),))
         c.execute("INSERT INTO sessions VALUES(?,?,?,?)", (token, row["id"], csrf, int(time.time()) + 86400 * 14))
         public_user = {k: row[k] for k in ("id", "name", "email", "role")}
     response = JSONResponse({"user": public_user, "csrf": csrf})
@@ -214,6 +229,7 @@ async def create_module(request: Request, user=Depends(creator)):
     mid = uuid.uuid4().hex[:12]
     with connection() as c:
         c.execute("INSERT INTO modules(id,owner,workspace_id,title,description) VALUES(?,?,?,?,?)", (mid, user["id"], user["workspace_id"], title.strip(), data.get("description", "")))
+        record_event(c, "module_created", user["workspace_id"], user["id"], mid)
         return package(c, module_row(c, mid), True)
 
 
@@ -228,7 +244,7 @@ def get_module(mid: str, user=Depends(require_user)):
         if m["owner"] == user["id"] and user["workspace_role"] == "creator":
             result = package(c, m, True)
             if m["upload_job_id"]:
-                job = c.execute("SELECT id,state,stage,retry_count,duration,error FROM processing_jobs WHERE id=? AND module_id=?", (m["upload_job_id"], mid)).fetchone()
+                job = c.execute("SELECT id,state,stage,retry_count,duration,error,transcript_state,draft_state,provider,message FROM processing_jobs WHERE id=? AND module_id=?", (m["upload_job_id"], mid)).fetchone()
                 result["upload_job"] = dict(job) if job else None
             return result
         return published_package(c, m)
@@ -243,27 +259,42 @@ def delete_module(mid: str, user=Depends(creator)):
             paths.update(value for value in row if value)
         for row in c.execute("SELECT asset FROM processing_jobs WHERE module_id=?", (mid,)):
             paths.add(row["asset"])
+        for row in c.execute("SELECT audio_path FROM processing_jobs WHERE module_id=?", (mid,)):
+            paths.add(row["audio_path"])
         c.execute("DELETE FROM invitations WHERE module_id=?", (mid,))
         c.execute("DELETE FROM answers WHERE attempt_id IN (SELECT id FROM attempts WHERE module_id=?)", (mid,))
         c.execute("DELETE FROM attempt_progress WHERE attempt_id IN (SELECT id FROM attempts WHERE module_id=?)", (mid,))
         c.execute("DELETE FROM attempts WHERE module_id=?", (mid,))
         c.execute("DELETE FROM module_versions WHERE module_id=?", (mid,))
         c.execute("DELETE FROM modules WHERE id=?", (mid,))
+        record_event(c, "module_deleted", user["workspace_id"], user["id"], mid)
     for name in paths:
-        (FILES / Path(name).name).unlink(missing_ok=True)
+        if name:
+            (FILES / Path(name).name).unlink(missing_ok=True)
 
 
 @app.get("/api/modules/{mid}/results")
 def results(mid: str, user=Depends(require_user)):
     with connection() as c:
-        owned_module(c, mid, user)
+        m = owned_module(c, mid, user)
         rows = c.execute('''SELECT users.name,users.email,
             (SELECT score FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS score,
             (SELECT started FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS started,
             (SELECT completed FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS completed_at,
             (SELECT COUNT(*) FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner) AS attempt_count
             FROM assignments JOIN users ON users.id=assignments.learner WHERE assignments.module_id=? ORDER BY users.name''', (mid,)).fetchall()
-        return [dict(name=r["name"], email=r["email"], completed=bool(r["completed_at"]), status="completed" if r["completed_at"] else "in_progress" if r["started"] else "not_started", score=r["score"], started=r["started"], completed_at=r["completed_at"], attempt_count=r["attempt_count"]) for r in rows]
+        result = []
+        for r in rows:
+            completed = bool(r["completed_at"])
+            passed = bool(completed and (r["score"] or 0) >= m["pass_score"])
+            result.append(dict(
+                name=r["name"], email=r["email"], completed=completed,
+                status="completed" if completed else "in_progress" if r["started"] else "not_started",
+                outcome="passed" if passed else "not_passed" if completed else "in_progress" if r["started"] else "not_started",
+                passed=passed, pass_score=m["pass_score"], score=r["score"], started=r["started"],
+                completed_at=r["completed_at"], attempt_count=r["attempt_count"],
+            ))
+        return result
 
 
 @app.post("/api/modules/{mid}/assign")
@@ -278,6 +309,7 @@ async def assign(mid: str, request: Request, user=Depends(creator)):
         if not learner:
             fail(404, "No learner account found for that email.")
         c.execute("INSERT OR IGNORE INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)", (mid, learner["id"], int(time.time())))
+        record_event(c, "learner_assigned", user["workspace_id"], user["id"], mid, {"learner_id": learner["id"]})
     return {"ok": True}
 
 
@@ -298,6 +330,7 @@ async def create_invitation(request: Request, user=Depends(creator)):
         token = secrets.token_urlsafe(32)
         expires = int(time.time()) + 7 * 86400
         c.execute("INSERT INTO invitations(token_hash,workspace_id,email,role,module_id,created_by,expires) VALUES(?,?,?,?,?,?,?)", (hashlib.sha256(token.encode()).hexdigest(), user["workspace_id"], email, "learner", mid, user["id"], expires))
+        record_event(c, "learner_invited", user["workspace_id"], user["id"], mid)
     return {"token": token, "email": email, "expires": expires}
 
 
@@ -337,6 +370,7 @@ async def accept_invitation(request: Request):
         if invite["module_id"]:
             c.execute("INSERT INTO assignments(module_id,learner,assigned_at) VALUES(?,?,?)", (invite["module_id"], user_id, int(time.time())))
         c.execute("UPDATE invitations SET accepted=? WHERE token_hash=?", (int(time.time()), invite["token_hash"]))
+        record_event(c, "learner_joined", invite["workspace_id"], user_id, invite["module_id"])
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         c.execute("INSERT INTO sessions VALUES(?,?,?,?)", (token, user_id, csrf, int(time.time()) + 86400 * 14))
         public_user = {"id": user_id, "name": name.strip(), "email": invite["email"], "role": invite["role"]}
@@ -380,6 +414,7 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
                 if old_job and old_job["state"] in ("queued", "failed"):
                     superseded_asset = old_job["asset"]
                     c.execute("UPDATE media_assets SET state='superseded' WHERE id=?", (previous,))
+            record_event(c, "video_uploaded", user["workspace_id"], user["id"], mid, {"job_id": job_id})
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -388,17 +423,21 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
     if superseded_asset:
         (FILES / Path(superseded_asset).name).unlink(missing_ok=True)
         (FILES / f"{Path(superseded_asset).stem}-playback.mp4").unlink(missing_ok=True)
+        (FILES / f"{Path(superseded_asset).stem}-audio.wav").unlink(missing_ok=True)
     return JSONResponse({"ok": True, "job_id": job_id, "state": "queued", "message": "Upload complete. Video inspection is queued."}, status_code=202)
 
 
 @app.get("/api/modules/{mid}/uploads/{job_id}")
-def upload_status(mid: str, job_id: str, user=Depends(creator)):
+def upload_status(mid: str, job_id: str, user=Depends(creator_read)):
     with connection() as c:
         owned_module(c, mid, user)
-        job = c.execute("SELECT state,stage,retry_count,duration,error,filename FROM processing_jobs WHERE id=? AND module_id=? AND workspace_id=?", (job_id, mid, user["workspace_id"])).fetchone()
+        job = c.execute("SELECT state,stage,retry_count,duration,error,filename,transcript_state,draft_state,provider,message FROM processing_jobs WHERE id=? AND module_id=? AND workspace_id=?", (job_id, mid, user["workspace_id"])).fetchone()
         if not job:
             fail(404, "Upload job not found.")
-        return dict(job)
+        result = dict(job)
+        result["can_retry"] = result["state"] in ("failed", "ready") and bool(result["error"])
+        result["has_draft"] = bool(c.execute("SELECT 1 FROM generated_drafts WHERE module_id=?", (mid,)).fetchone())
+        return result
 
 
 @app.post("/api/modules/{mid}/uploads/{job_id}/retry")
@@ -408,7 +447,7 @@ def retry_upload(mid: str, job_id: str, user=Depends(creator)):
         job = c.execute("SELECT * FROM processing_jobs WHERE id=? AND module_id=? AND workspace_id=?", (job_id, mid, user["workspace_id"])).fetchone()
         if not job:
             fail(404, "Upload job not found.")
-        if job["state"] != "failed":
+        if job["state"] != "failed" and not (job["state"] == "ready" and job["error"]):
             fail(409, "Only a failed video processing job can be retried.")
         current = c.execute("SELECT upload_job_id FROM modules WHERE id=?", (mid,)).fetchone()
         if not current or current["upload_job_id"] != job_id:
@@ -416,10 +455,137 @@ def retry_upload(mid: str, job_id: str, user=Depends(creator)):
         if not (FILES / Path(job["asset"]).name).is_file():
             fail(410, "The uploaded file is no longer available. Upload it again.")
         now = int(time.time())
-        c.execute("UPDATE processing_jobs SET state='queued',stage='inspection',retry_count=retry_count+1,updated_at=?,claimed_at=NULL,error=NULL WHERE id=?", (now, job_id))
+        c.execute("UPDATE processing_jobs SET state='queued',stage='inspection',retry_count=retry_count+1,updated_at=?,claimed_at=NULL,error=NULL,message=NULL,transcript_state='pending',draft_state='pending' WHERE id=?", (now, job_id))
         c.execute("UPDATE media_assets SET state='queued' WHERE id=?", (job_id,))
         c.execute("UPDATE modules SET upload_job_id=? WHERE id=?", (job_id, mid))
+        record_event(c, "video_retry_queued", user["workspace_id"], user["id"], mid, {"job_id": job_id})
     return {"ok": True, "state": "queued"}
+
+
+def media_version(c, m, version):
+    """Return (video, playback_video, transcript) for a draft or saved version."""
+    if version is not None:
+        if not str(version).isdigit() or m["status"] != "published":
+            fail(404, "Missing media")
+        saved = c.execute("SELECT video,playback_video,snapshot FROM module_versions WHERE module_id=? AND version=?", (m["id"], int(version))).fetchone()
+        if not saved:
+            fail(404, "Missing media")
+        return saved["video"], saved["playback_video"], json.loads(saved["snapshot"]).get("transcript", [])
+    if m["status"] == "published":
+        saved = c.execute("SELECT video,playback_video,snapshot FROM module_versions WHERE module_id=? AND version=?", (m["id"], m["published_version"])).fetchone()
+        if saved:
+            return saved["video"], saved["playback_video"], json.loads(saved["snapshot"]).get("transcript", [])
+    return m["video"], m["playback_video"], package(c, m)["transcript"]
+
+
+@app.get("/api/modules/{mid}/draft")
+def get_module_draft(mid: str, user=Depends(creator_read)):
+    with connection() as c:
+        owned_module(c, mid, user)
+        return {"draft": generated_draft(c, mid)}
+
+
+@app.delete("/api/modules/{mid}/draft", status_code=204)
+def dismiss_module_draft(mid: str, user=Depends(creator)):
+    with connection() as c:
+        owned_module(c, mid, user)
+        c.execute("DELETE FROM generated_drafts WHERE module_id=?", (mid,))
+
+
+@app.post("/api/modules/{mid}/draft/apply")
+async def apply_module_draft(mid: str, request: Request, user=Depends(creator)):
+    data = await body_json(request)
+    sections = data.get("sections", ["transcript", "lessons", "questions"])
+    if not isinstance(sections, list) or any(section not in ("transcript", "lessons", "questions", "details") for section in sections):
+        fail(400, "Choose valid draft sections to apply.")
+    replace = bool(data.get("replace", False))
+    applied, skipped = [], []
+    with connection() as c:
+        m = owned_module(c, mid, user)
+        draft = generated_draft(c, mid)
+        if not draft:
+            fail(404, "No generated draft is available for this module.")
+        now = int(time.time())
+        if "details" in sections:
+            if draft["title"] or draft["description"]:
+                new_title = draft["title"] or m["title"] if replace or not m["title"].strip() else m["title"]
+                new_description = draft["description"] or m["description"] if replace or not m["description"].strip() else m["description"]
+                if new_title != m["title"] or new_description != m["description"]:
+                    c.execute("UPDATE modules SET title=?,description=? WHERE id=?", (new_title, new_description, mid))
+                    applied.append("details")
+                else:
+                    skipped.append("details")
+        if "transcript" in sections and draft["transcript"]:
+            existing = c.execute("SELECT COUNT(*) FROM transcript_segments WHERE module_id=?", (mid,)).fetchone()[0]
+            if existing and not replace:
+                skipped.append("transcript")
+            else:
+                if replace:
+                    c.execute("DELETE FROM transcript_segments WHERE module_id=?", (mid,))
+                for i, item in enumerate(draft["transcript"]):
+                    start, end = finite_number(item.get("start")), finite_number(item.get("end"))
+                    text = item.get("text")
+                    if start is None or end is None or start < 0 or end <= start or (m["duration"] and end > m["duration"]) or not isinstance(text, str) or not text.strip():
+                        fail(409, "The generated transcript does not fit the current video. Upload the matching video and retry draft generation.")
+                    c.execute(
+                        "INSERT INTO transcript_segments(id,module_id,ord,start,end,text,origin,edited) VALUES(?,?,?,?,?,?,'generated',0)",
+                        (uuid.uuid4().hex, mid, i, start, end, text.strip()),
+                    )
+                applied.append("transcript")
+        if "lessons" in sections and draft["lessons"]:
+            existing = c.execute("SELECT COUNT(*) FROM lessons WHERE module_id=?", (mid,)).fetchone()[0]
+            if existing and not replace:
+                skipped.append("lessons")
+            else:
+                previous_end = -1
+                for item in draft["lessons"]:
+                    if (
+                        item["start"] < previous_end
+                        or item["start"] < 0
+                        or item["end"] <= item["start"]
+                        or (m["duration"] and item["end"] > m["duration"])
+                    ):
+                        fail(409, "The generated lessons do not fit the current video. Upload the matching video and retry draft generation.")
+                    previous_end = item["end"]
+                if replace:
+                    c.execute("DELETE FROM lessons WHERE module_id=?", (mid,))
+                for i, item in enumerate(draft["lessons"]):
+                    c.execute(
+                        "INSERT INTO lessons VALUES(?,?,?,?,?,?,?,'generated')",
+                        (uuid.uuid4().hex, mid, i, item["title"], item["summary"], item["start"], item["end"]),
+                    )
+                applied.append("lessons")
+        if "questions" in sections and draft["questions"]:
+            existing = c.execute("SELECT COUNT(*) FROM questions WHERE module_id=?", (mid,)).fetchone()[0]
+            if existing and not replace:
+                skipped.append("questions")
+            else:
+                for item in draft["questions"]:
+                    if item["at"] < 0 or (m["duration"] and item["at"] > m["duration"]):
+                        fail(409, "The generated questions do not fit the current video. Upload the matching video and retry draft generation.")
+                if replace:
+                    c.execute("DELETE FROM questions WHERE module_id=?", (mid,))
+                for i, item in enumerate(draft["questions"]):
+                    c.execute(
+                        "INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,'generated')",
+                        (uuid.uuid4().hex, mid, i, item["prompt"], json.dumps(item["options"]), item["answer"], item["explanation"], item["at"]),
+                    )
+                applied.append("questions")
+        c.execute("UPDATE generated_drafts SET state='applied' WHERE module_id=?", (mid,))
+        record_event(c, "draft_applied", user["workspace_id"], user["id"], mid, {"sections": applied, "replace": replace})
+        result = package(c, module_row(c, mid), True)
+    return {"ok": True, "applied": applied, "skipped": skipped, "module": result}
+
+
+@app.get("/media/{mid}/captions.vtt")
+def captions(mid: str, request: Request, user=Depends(require_user)):
+    with connection() as c:
+        m = module_row(c, mid)
+        if not m or not can_view(c, m, user):
+            fail(403, "Forbidden")
+        _video, _playback, transcript = media_version(c, m, request.query_params.get("version"))
+    body = captions_vtt(transcript)
+    return Response(body, media_type="text/vtt; charset=utf-8", headers={"Content-Language": "en"})
 
 
 @app.get("/media/{mid}")
@@ -451,8 +617,12 @@ async def update_module(mid: str, request: Request, user=Depends(creator)):
     if not isinstance(title, str) or not title.strip():
         fail(400, "Add a module title first.")
     with connection() as c:
-        owned_module(c, mid, user)
-        c.execute("UPDATE modules SET title=?,description=? WHERE id=?", (title.strip(), data.get("description", ""), mid))
+        m = owned_module(c, mid, user)
+        pass_score = data.get("pass_score", m["pass_score"])
+        if type(pass_score) is not int or pass_score not in range(0, 101):
+            fail(400, "Passing score must be a whole number from 0 to 100.")
+        c.execute("UPDATE modules SET title=?,description=?,pass_score=? WHERE id=?", (title.strip(), data.get("description", ""), pass_score, mid))
+        record_event(c, "module_updated", user["workspace_id"], user["id"], mid)
         return package(c, module_row(c, mid), True)
 
 
@@ -495,7 +665,8 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
                 if not isinstance(title, str) or not title.strip() or start is None or end is None or start < previous_end or start < 0 or end <= start or (m["duration"] and end > m["duration"]):
                     fail(400, "Lessons need a title and valid, non-overlapping time ranges within the video.")
                 previous_end = end
-                c.execute("INSERT INTO lessons VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,title=excluded.title,summary=excluded.summary,start=excluded.start,end=excluded.end", (item_id, mid, i, title.strip(), item.get("summary", ""), start, end))
+                origin = item.get("origin", "manual") if item.get("origin") in ("manual", "generated") else "manual"
+                c.execute("INSERT INTO lessons(id,module_id,ord,title,summary,start,end,origin) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,title=excluded.title,summary=excluded.summary,start=excluded.start,end=excluded.end", (item_id, mid, i, title.strip(), item.get("summary", ""), start, end, origin))
             else:
                 options = item.get("options")
                 at = finite_number(item.get("at"))
@@ -503,7 +674,8 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
                 prompt, explanation = item.get("prompt"), item.get("explanation")
                 if not isinstance(prompt, str) or not prompt.strip() or not isinstance(explanation, str) or not explanation.strip() or not isinstance(options, list) or len(options) < 2 or any(not isinstance(o, str) or not o.strip() for o in options) or type(answer) is not int or answer not in range(len(options)) or at is None or at < 0 or (m["duration"] and at > m["duration"]):
                     fail(400, "Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.")
-                c.execute("INSERT INTO questions VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at", (item_id, mid, i, prompt.strip(), json.dumps(options), answer, explanation, at))
+                origin = item.get("origin", "manual") if item.get("origin") in ("manual", "generated") else "manual"
+                c.execute("INSERT INTO questions(id,module_id,ord,prompt,options,answer,explanation,at,origin) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at", (item_id, mid, i, prompt.strip(), json.dumps(options), answer, explanation, at, origin))
         if ids:
             placeholders = ",".join("?" for _ in ids)
             c.execute(f"DELETE FROM {table} WHERE module_id=? AND id NOT IN ({placeholders})", [mid, *ids])
@@ -533,6 +705,7 @@ def publish(mid: str, user=Depends(creator)):
         now = int(time.time())
         c.execute("INSERT INTO module_versions(module_id,version,snapshot,video,created_at,playback_video,media_asset_id) VALUES(?,?,?,?,?,?,?)", (mid, version, json.dumps(snapshot), m["video"], now, m["playback_video"], m["media_asset_id"]))
         c.execute("UPDATE modules SET status='published',published_at=?,published_version=? WHERE id=?", (now, version, mid))
+        record_event(c, "module_published", user["workspace_id"], user["id"], mid, {"version": version})
         return {"ok": True, "version": version}
 
 
@@ -565,6 +738,7 @@ async def start_attempt(request: Request, user=Depends(require_csrf)):
             aid = uuid.uuid4().hex
             c.execute("INSERT INTO attempts(id,module_id,learner,started,version) VALUES(?,?,?,?,?)", (aid, mid, user["id"], int(time.time()), m["published_version"]))
             attempt = c.execute("SELECT * FROM attempts WHERE id=?", (aid,)).fetchone()
+            record_event(c, "attempt_started", user["workspace_id"], user["id"], mid, {"attempt_id": aid, "version": m["published_version"]})
         c.execute("INSERT OR IGNORE INTO attempt_progress(attempt_id) VALUES(?)", (attempt["id"],))
         return attempt_state(c, attempt)
 
@@ -576,11 +750,20 @@ def owned_attempt(c, aid, user):
     return attempt
 
 
-def completion(c, attempt, snapshot):
+def completion(c, attempt, snapshot, score=None):
     progress = c.execute("SELECT completed_lessons FROM attempt_progress WHERE attempt_id=?", (attempt["id"],)).fetchone()
     done = set(json.loads(progress["completed_lessons"])) if progress else set()
     answered = c.execute("SELECT COUNT(DISTINCT question_id) FROM answers WHERE attempt_id=?", (attempt["id"],)).fetchone()[0]
-    return bool(snapshot["lessons"] and snapshot["questions"] and len(done) >= len(snapshot["lessons"]) and answered >= len(snapshot["questions"]))
+    completed = bool(snapshot["lessons"] and snapshot["questions"] and len(done) >= len(snapshot["lessons"]) and answered >= len(snapshot["questions"]))
+    score = int(attempt["score"] or 0) if score is None else int(score)
+    module = module_row(c, attempt["module_id"])
+    pass_score = int(module["pass_score"] if module else snapshot.get("pass_score", 70))
+    return {
+        "completed": completed,
+        "score": score,
+        "pass_score": pass_score,
+        "passed": bool(completed and score >= pass_score),
+    }
 
 
 @app.post("/api/attempts/{aid}/progress")
@@ -602,9 +785,18 @@ async def save_progress(aid: str, request: Request, user=Depends(require_csrf)):
             done.add(lesson_id)
         c.execute("INSERT INTO attempt_progress(attempt_id,position,completed_lessons) VALUES(?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET position=excluded.position,completed_lessons=excluded.completed_lessons", (aid, position, json.dumps(sorted(done))))
         completed = completion(c, attempt, snapshot)
-        if completed:
+        if completed["completed"]:
             c.execute("UPDATE attempts SET completed=COALESCE(completed,?) WHERE id=?", (int(time.time()), aid))
-        return {"position": position, "completed_lessons": sorted(done), "completed": completed or bool(attempt["completed"])}
+            if not attempt["completed"]:
+                record_event(c, "attempt_completed", user["workspace_id"], user["id"], attempt["module_id"], {"attempt_id": aid, "score": completed["score"], "passed": completed["passed"]})
+        return {
+            "position": position,
+            "completed_lessons": sorted(done),
+            "completed": completed["completed"] or bool(attempt["completed"]),
+            "score": completed["score"],
+            "pass_score": completed["pass_score"],
+            "passed": completed["passed"] or bool(attempt["completed"] and completed["score"] >= completed["pass_score"]),
+        }
 
 
 @app.post("/api/attempts/{aid}")
@@ -625,9 +817,19 @@ async def answer(aid: str, request: Request, user=Depends(require_csrf)):
         correct = choice == question["answer"]
         c.execute("INSERT INTO answers(attempt_id,question_id,choice,correct) VALUES(?,?,?,?)", (aid, question["id"], choice, int(correct)))
         score = round(c.execute("SELECT AVG(correct)*100 FROM answers WHERE attempt_id=?", (aid,)).fetchone()[0] or 0)
-        completed = completion(c, attempt, snapshot)
-        c.execute("UPDATE attempts SET score=?,completed=CASE WHEN ? THEN COALESCE(completed,?) ELSE completed END WHERE id=?", (score, completed, int(time.time()), aid))
-        return {"correct": correct, "explanation": question["explanation"], "score": score, "completed": completed or bool(attempt["completed"])}
+        completed = completion(c, attempt, snapshot, score=score)
+        c.execute("UPDATE attempts SET score=?,completed=CASE WHEN ? THEN COALESCE(completed,?) ELSE completed END WHERE id=?", (score, completed["completed"], int(time.time()), aid))
+        if completed["completed"]:
+            if not attempt["completed"]:
+                record_event(c, "attempt_completed", user["workspace_id"], user["id"], attempt["module_id"], {"attempt_id": aid, "score": score, "passed": completed["passed"]})
+        return {
+            "correct": correct,
+            "explanation": question["explanation"],
+            "score": score,
+            "pass_score": completed["pass_score"],
+            "passed": completed["passed"] or bool(attempt["completed"] and score >= completed["pass_score"]),
+            "completed": completed["completed"] or bool(attempt["completed"]),
+        }
 
 
 if __name__ == "__main__":

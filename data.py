@@ -2,6 +2,8 @@
 import hashlib, hmac, json, math, os, secrets, shutil, sqlite3, subprocess, time, uuid
 from pathlib import Path
 
+from migrations import migrate
+
 ROOT = Path(__file__).resolve().parent
 DB = Path(os.environ.get('TRAINLY_DB', ROOT / 'trainly.sqlite3'))
 FILES = Path(os.environ.get('TRAINLY_STORAGE', ROOT / 'storage'))
@@ -83,6 +85,51 @@ def prepare_browser_playback(path, extension, details):
     finally:
         temporary.unlink(missing_ok=True)
 
+
+def extract_audio(path):
+    """Extract a mono 16 kHz WAV for transcription. Returns the derived path."""
+    destination = Path(path).with_name(f'{Path(path).stem}-audio.wav')
+    temporary = destination.with_name(f'{destination.stem}-{uuid.uuid4().hex[:8]}.tmp.wav')
+    command = [
+        os.environ.get('TRAINLY_FFMPEG', 'ffmpeg'), '-v', 'error', '-y', '-i', str(path),
+        '-vn', '-map', '0:a:0', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(temporary),
+    ]
+    try:
+        subprocess.run(command, capture_output=True, text=True, timeout=4 * 60 * 60, check=True)
+        temporary.replace(destination)
+        return destination
+    except FileNotFoundError as e:
+        raise ValueError('Audio extraction is unavailable. Install FFmpeg or set TRAINLY_FFMPEG.') from e
+    except subprocess.TimeoutExpired as e:
+        raise ValueError('Audio extraction took too long. Try a shorter or simpler video.') from e
+    except subprocess.CalledProcessError as e:
+        raise ValueError('Audio extraction failed. Check that the uploaded video has usable audio.') from e
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def vtt_timestamp(seconds):
+    milliseconds = max(0, round(float(seconds) * 1000))
+    hours, milliseconds = divmod(milliseconds, 3600 * 1000)
+    minutes, milliseconds = divmod(milliseconds, 60 * 1000)
+    seconds, milliseconds = divmod(milliseconds, 1000)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}'
+
+
+def captions_vtt(segments):
+    """Build WebVTT captions from reviewed transcript segments."""
+    lines = ['WEBVTT', '']
+    for item in segments or []:
+        start = finite_number(item.get('start'))
+        end = finite_number(item.get('end'))
+        text = item.get('text')
+        if start is None or end is None or end <= start or not isinstance(text, str) or not text.strip():
+            continue
+        # A blank line ends a cue, and "-->" would be parsed as a cue timing.
+        cue = text.replace('\r\n', '\n').replace('\r', '\n').replace('-->', '→').strip()
+        lines.extend([f'{vtt_timestamp(start)} --> {vtt_timestamp(end)}', cue, ''])
+    return '\n'.join(lines)
+
 SCHEMA = '''
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, password TEXT, role TEXT);
@@ -90,26 +137,29 @@ CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS memberships(workspace_id TEXT NOT NULL, user_id INTEGER NOT NULL UNIQUE, role TEXT NOT NULL CHECK(role IN ('creator','learner')), PRIMARY KEY(workspace_id,user_id), FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS invitations(token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('creator','learner')), module_id TEXT, created_by INTEGER NOT NULL, expires INTEGER NOT NULL, accepted INTEGER, FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(module_id) REFERENCES modules(id), FOREIGN KEY(created_by) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, csrf TEXT, expires INTEGER, FOREIGN KEY(user_id) REFERENCES users(id));
-CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, workspace_id TEXT NOT NULL DEFAULT 'local', title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, published_version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(owner) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, workspace_id TEXT NOT NULL DEFAULT 'local', title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, published_version INTEGER NOT NULL DEFAULT 0, pass_score INTEGER NOT NULL DEFAULT 70, FOREIGN KEY(owner) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS media_assets(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, source_path TEXT NOT NULL, playback_path TEXT, container TEXT, video_codec TEXT, audio_codec TEXT, duration INTEGER, state TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, title TEXT, summary TEXT, start REAL, end REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, prompt TEXT, options TEXT, answer INTEGER, explanation TEXT, at REAL, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, title TEXT, summary TEXT, start REAL, end REAL, origin TEXT NOT NULL DEFAULT 'manual', FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, module_id TEXT, ord INTEGER, prompt TEXT, options TEXT, answer INTEGER, explanation TEXT, at REAL, origin TEXT NOT NULL DEFAULT 'manual', FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS transcript_segments(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, ord INTEGER NOT NULL, start REAL NOT NULL, end REAL NOT NULL, text TEXT NOT NULL, origin TEXT NOT NULL DEFAULT 'manual', edited INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY, module_id TEXT, learner INTEGER, started INTEGER, completed INTEGER, score INTEGER DEFAULT 0, version INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(module_id) REFERENCES modules(id));
 CREATE TABLE IF NOT EXISTS answers(id INTEGER PRIMARY KEY, attempt_id TEXT, question_id TEXT, choice INTEGER, correct INTEGER, FOREIGN KEY(attempt_id) REFERENCES attempts(id));
 CREATE TABLE IF NOT EXISTS attempt_progress(attempt_id TEXT PRIMARY KEY, position REAL NOT NULL DEFAULT 0, completed_lessons TEXT NOT NULL DEFAULT '[]', FOREIGN KEY(attempt_id) REFERENCES attempts(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS module_versions(module_id TEXT NOT NULL, version INTEGER NOT NULL, snapshot TEXT NOT NULL, video TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, playback_video TEXT NOT NULL DEFAULT '', media_asset_id TEXT, PRIMARY KEY(module_id,version), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(media_asset_id) REFERENCES media_assets(id));
 CREATE TABLE IF NOT EXISTS assignments(module_id TEXT NOT NULL, learner INTEGER NOT NULL, assigned_at INTEGER NOT NULL, PRIMARY KEY(module_id,learner), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(learner) REFERENCES users(id) ON DELETE CASCADE);
-CREATE TABLE IF NOT EXISTS processing_jobs(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, workspace_id TEXT NOT NULL, asset TEXT NOT NULL, filename TEXT NOT NULL, extension TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'inspection', state TEXT NOT NULL DEFAULT 'queued', retry_count INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, claimed_at INTEGER, duration INTEGER, error TEXT, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(workspace_id) REFERENCES workspaces(id));
+CREATE TABLE IF NOT EXISTS processing_jobs(id TEXT PRIMARY KEY, module_id TEXT NOT NULL, workspace_id TEXT NOT NULL, asset TEXT NOT NULL, filename TEXT NOT NULL, extension TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'inspection', state TEXT NOT NULL DEFAULT 'queued', retry_count INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, claimed_at INTEGER, duration INTEGER, error TEXT, audio_path TEXT, transcript_state TEXT NOT NULL DEFAULT 'pending', draft_state TEXT NOT NULL DEFAULT 'pending', provider TEXT, message TEXT, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(workspace_id) REFERENCES workspaces(id));
 CREATE INDEX IF NOT EXISTS processing_jobs_state_created ON processing_jobs(state,created_at);
+CREATE TABLE IF NOT EXISTS generated_drafts(module_id TEXT PRIMARY KEY, transcript TEXT NOT NULL DEFAULT '[]', lessons TEXT NOT NULL DEFAULT '[]', questions TEXT NOT NULL DEFAULT '[]', title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', provider TEXT, state TEXT NOT NULL DEFAULT 'ready', created_at INTEGER NOT NULL, error TEXT, FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, name TEXT NOT NULL, workspace_id TEXT, user_id INTEGER, module_id TEXT, created_at INTEGER NOT NULL, meta TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX IF NOT EXISTS events_name_created ON events(name,created_at);
+CREATE INDEX IF NOT EXISTS events_module ON events(module_id,created_at);
 '''
 def db():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row
     c.execute('PRAGMA busy_timeout=20000')
     c.execute('PRAGMA journal_mode=WAL')
     c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA)
-    for table,column,definition in [('modules','published_version','INTEGER NOT NULL DEFAULT 0'),('modules','workspace_id',"TEXT NOT NULL DEFAULT 'local'"),('modules','upload_job_id','TEXT'),('modules','playback_video',"TEXT NOT NULL DEFAULT ''"),('modules','media_asset_id','TEXT'),('module_versions','playback_video',"TEXT NOT NULL DEFAULT ''"),('module_versions','media_asset_id','TEXT'),('attempts','version','INTEGER NOT NULL DEFAULT 0')]:
-        if column not in {row['name'] for row in c.execute(f'PRAGMA table_info({table})')}: c.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+    migrate(c)
     return c
 
 def seed():
@@ -120,9 +170,9 @@ def seed():
         owner=c.execute("SELECT id FROM users WHERE role='creator'").fetchone()[0]; mid='workplace-safety'
         c.execute('INSERT INTO modules(id,owner,title,description,duration,status,published_at) VALUES(?,?,?,?,?,?,?)',(mid,owner,'Workplace safety essentials','A practical introduction to safer, more confident work.',568,'published',int(time.time())))
         lessons=[('Start with awareness','Notice hazards early and make safety part of every decision.',0,180),('Protect yourself and your team','Use protective equipment and keep shared spaces clear.',180,390),('Respond with confidence','Know how to report an incident and get help quickly.',390,568)]
-        for i,(t,s,a,b) in enumerate(lessons): c.execute('INSERT INTO lessons VALUES(?,?,?,?,?,?,?)',(str(uuid.uuid4()),mid,i,t,s,a,b))
+        for i,(t,s,a,b) in enumerate(lessons): c.execute('INSERT INTO lessons VALUES(?,?,?,?,?,?,?,\'manual\')',(str(uuid.uuid4()),mid,i,t,s,a,b))
         qs=[('What should you do when you notice a new hazard?',['Ignore it if no one is hurt','Make the area safe and report it','Wait until the end of your shift'],1,'Act early: make the situation safe and let the right person know.',170),('When should protective equipment be used?',['Whenever the task or site requires it','Only when a manager is nearby','Only after an incident'],0,'Follow the requirements for the task and the work area.',380),('What is the best first step after an incident?',['Keep it to yourself','Report it promptly and get help','Post about it online'],1,'Prompt reporting helps the team respond and prevent repeat incidents.',568)]
-        for i,(p,o,a,e,t) in enumerate(qs): c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?)',(str(uuid.uuid4()),mid,i,p,json.dumps(o),a,e,t))
+        for i,(p,o,a,e,t) in enumerate(qs): c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,\'manual\')',(str(uuid.uuid4()),mid,i,p,json.dumps(o),a,e,t))
     c.commit(); c.close()
 seed()
 
@@ -148,29 +198,53 @@ def module_row(c, mid): return c.execute('SELECT * FROM modules WHERE id=?',(mid
 def attempt_state(c, attempt):
     progress=c.execute('SELECT position,completed_lessons FROM attempt_progress WHERE attempt_id=?',(attempt['id'],)).fetchone()
     answered=[r['question_id'] for r in c.execute('SELECT DISTINCT question_id FROM answers WHERE attempt_id=?',(attempt['id'],))]
-    return dict(id=attempt['id'],version=attempt['version'],position=progress['position'] if progress else 0,completed_lessons=json.loads(progress['completed_lessons']) if progress else [],answered_questions=answered,completed=bool(attempt['completed']))
+    module=module_row(c, attempt['module_id'])
+    pass_score=int(module['pass_score'] or 70) if module else 70
+    score=int(attempt['score'] or 0)
+    return dict(id=attempt['id'],version=attempt['version'],position=progress['position'] if progress else 0,completed_lessons=json.loads(progress['completed_lessons']) if progress else [],answered_questions=answered,completed=bool(attempt['completed']),score=score,pass_score=pass_score,passed=bool(attempt['completed'] and score>=pass_score))
 def package(c,m,include_answers=False):
     questions=[]
     for x in c.execute('SELECT * FROM questions WHERE module_id=? ORDER BY ord',(m['id'],)):
-        item=dict(id=x['id'],prompt=x['prompt'],options=json.loads(x['options']),explanation=x['explanation'],at=x['at'])
+        item=dict(id=x['id'],prompt=x['prompt'],options=json.loads(x['options']),explanation=x['explanation'],at=x['at'],origin=x['origin'])
         if include_answers:item['answer']=x['answer']
         questions.append(item)
     transcript=[dict(id=x['id'],start=x['start'],end=x['end'],text=x['text'],origin=x['origin'],edited=bool(x['edited'])) for x in c.execute('SELECT * FROM transcript_segments WHERE module_id=? ORDER BY ord',(m['id'],))]
-    return dict(id=m['id'],title=m['title'],description=m['description'],video=bool(m['video']),duration=m['duration'],status=m['status'],version=m['published_version'],lessons=[dict(id=x['id'],title=x['title'],summary=x['summary'],start=x['start'],end=x['end']) for x in c.execute('SELECT * FROM lessons WHERE module_id=? ORDER BY ord',(m['id'],))],questions=questions,transcript=transcript)
+    return dict(id=m['id'],title=m['title'],description=m['description'],video=bool(m['video']),duration=m['duration'],status=m['status'],version=m['published_version'],pass_score=int(m['pass_score'] or 70),lessons=[dict(id=x['id'],title=x['title'],summary=x['summary'],start=x['start'],end=x['end'],origin=x['origin']) for x in c.execute('SELECT * FROM lessons WHERE module_id=? ORDER BY ord',(m['id'],))],questions=questions,transcript=transcript)
 
 def published_package(c,m,include_answers=False):
     row=c.execute('SELECT snapshot FROM module_versions WHERE module_id=? AND version=?',(m['id'],m['published_version'])).fetchone()
     if not row:return package(c,m,include_answers)
-    data=json.loads(row['snapshot']); data['status']='published'; data['version']=m['published_version']
+    data=json.loads(row['snapshot']); data['status']='published'; data['version']=m['published_version']; data['pass_score']=int(m['pass_score'] or 70); data.setdefault('transcript',[])
     if not include_answers:
         for question in data['questions']: question.pop('answer',None)
     return data
 
+def record_event(c,name,workspace_id=None,user_id=None,module_id=None,meta=None):
+    """Store a product event without video or transcript content."""
+    c.execute('INSERT INTO events(name,workspace_id,user_id,module_id,created_at,meta) VALUES(?,?,?,?,?,?)',(name,workspace_id,user_id,module_id,int(time.time()),json.dumps(meta or {})))
+
+def save_generated_draft(c,module_id,transcript,lessons,questions,title='',description='',provider=None,state='ready',error=None):
+    c.execute('INSERT INTO generated_drafts(module_id,transcript,lessons,questions,title,description,provider,state,created_at,error) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(module_id) DO UPDATE SET transcript=excluded.transcript,lessons=excluded.lessons,questions=excluded.questions,title=excluded.title,description=excluded.description,provider=excluded.provider,state=excluded.state,created_at=excluded.created_at,error=excluded.error',(module_id,json.dumps(transcript or []),json.dumps(lessons or []),json.dumps(questions or []),title or '',description or '',provider,state,int(time.time()),error))
+
+def generated_draft(c,module_id):
+    row=c.execute('SELECT * FROM generated_drafts WHERE module_id=?',(module_id,)).fetchone()
+    if not row:return None
+    return dict(module_id=row['module_id'],transcript=json.loads(row['transcript']),lessons=json.loads(row['lessons']),questions=json.loads(row['questions']),title=row['title'],description=row['description'],provider=row['provider'],state=row['state'],created_at=row['created_at'],error=row['error'])
+
 def attempt_snapshot(c,attempt):
     row=c.execute('SELECT snapshot FROM module_versions WHERE module_id=? AND version=?',(attempt['module_id'],attempt['version'])).fetchone()
-    if row:return json.loads(row['snapshot'])
-    m=module_row(c,attempt['module_id'])
-    return package(c,m,True)
+    if row:
+        data=json.loads(row['snapshot'])
+    else:
+        m=module_row(c,attempt['module_id'])
+        data=package(c,m,True)
+    data.setdefault('transcript',[])
+    module = module_row(c, attempt['module_id'])
+    if module:
+        data['pass_score'] = int(module['pass_score'] or 70)
+    else:
+        data.setdefault('pass_score', 70)
+    return data
 
 def ensure_published_versions():
     c=db()
@@ -211,7 +285,7 @@ def ensure_video_demo():
             ('Review the model', 'Open the model text and check its subcircuit definition.', 510, duration),
         ]
         for i, (title, summary, start, end) in enumerate(lessons):
-            c.execute('INSERT INTO lessons VALUES(?,?,?,?,?,?,?)', (f'{mid}-lesson-{i+1}', mid, i, title, summary, start, end))
+            c.execute('INSERT INTO lessons VALUES(?,?,?,?,?,?,?,\'manual\')', (f'{mid}-lesson-{i+1}', mid, i, title, summary, start, end))
         questions = [
             ('What is the presenter looking for on the manufacturer site?', ['A simulation model', 'A purchase receipt', 'A firmware update'], 0, 'The walkthrough starts by locating a component simulation model.', 125),
             ('Why keep the downloaded model file accessible?', ['So LTspice can reference it', 'To change the screen resolution', 'To remove the circuit ground'], 0, 'The simulator needs access to the model file used by the circuit.', 275),
@@ -219,7 +293,7 @@ def ensure_video_demo():
             ('What text identifies a reusable circuit model definition?', ['A .SUBCKT declaration', 'A browser cookie notice', 'A video timestamp'], 0, 'A .SUBCKT declaration begins a SPICE subcircuit model.', 560),
         ]
         for i, (prompt, options, answer, explanation, at) in enumerate(questions):
-            c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?)', (f'{mid}-question-{i+1}', mid, i, prompt, json.dumps(options), answer, explanation, at))
+            c.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,\'manual\')', (f'{mid}-question-{i+1}', mid, i, prompt, json.dumps(options), answer, explanation, at))
         snapshot = package(c, module_row(c, mid), True)
         c.execute('INSERT INTO module_versions(module_id,version,snapshot,video,created_at,playback_video) VALUES(?,?,?,?,?,?)',
                   (mid, 1, json.dumps(snapshot), target.name, now, target.name))
