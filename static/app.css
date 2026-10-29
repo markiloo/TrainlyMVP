@@ -34,3 +34,19 @@
 .check-placement .check-time{color:var(--navy);font-size:13px}
 .preview-timeline{margin:10px 0 0}
 .preview-timeline:empty{display:none}
+
+.answer-option-row{display:flex;gap:8px;align-items:center;min-width:0;margin:7px 0}.answer-option-row input[type="radio"]{width:auto;flex:none;margin:0}.answer-option-row input[data-option]{flex:1;min-width:0}.answer-option-row .icon-btn{flex:none}
+
+@keyframes page-fade-out{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(-8px) scale(.995)}}
+@keyframes page-fade-in{from{opacity:0;transform:translateY(12px) scale(.995)}to{opacity:1;transform:translateY(0) scale(1)}}
+.page-outgoing{position:fixed;inset:0;z-index:20;pointer-events:none;overflow:hidden;transform-origin:top center;animation:page-fade-out 260ms cubic-bezier(.4,0,1,1) forwards}
+#app.page-entering{transform-origin:top center;animation:page-fade-in 360ms cubic-bezier(.16,1,.3,1) both}
+@keyframes modal-fade-in{from{opacity:0;transform:translateY(18px) scale(.965)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes modal-fade-out{to{opacity:0;transform:translateY(10px) scale(.98)}}
+@keyframes backdrop-fade-in{from{background:transparent}to{background:#16212ab3}}
+@keyframes backdrop-fade-out{to{background:transparent}}
+.app-modal[open]{animation:modal-fade-in 300ms cubic-bezier(.16,1,.3,1) both}
+.app-modal[open]::backdrop{animation:backdrop-fade-in 300ms ease-out both}
+.app-modal.closing{animation:modal-fade-out 210ms ease-in forwards}
+.app-modal.closing::backdrop{animation:backdrop-fade-out 210ms ease-in forwards}
+@media(prefers-reduced-motion:reduce){.page-outgoing,#app.page-entering,.app-modal[open],.app-modal[open]::backdrop,.app-modal.closing,.app-modal.closing::backdrop{animation:none}}
