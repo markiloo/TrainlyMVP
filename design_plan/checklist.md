@@ -1,6 +1,6 @@
 # Trainly MVP implementation checklist
 
-Use this checklist to track work against the [product requirements](./prd.md) and [web stack decision](./web_stack.md). Checked items describe behavior present in the local MVP as of 2026-10-20; they do not imply production readiness. Update the boxes as work lands. Requirement IDs refer to Section 4.3 of the PRD.
+Use this checklist to track work against the [product requirements](./prd.md) and [web stack decision](./web_stack.md). Checked items describe behavior present in the local MVP as of 2026-10-30; they do not imply production readiness. Update the boxes as work lands. Requirement IDs refer to Section 4.3 of the PRD.
 
 ## 1. Move the existing app to FastAPI first
 
@@ -16,7 +16,7 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 
 ## 2. Accounts, workspaces, and assignments
 
-- [x] Seed creator and learner demo accounts and support sign-in with hashed passwords. (F1)
+- [x] Seed admin, creator, and learner demo accounts and support sign-in with hashed passwords. (F1)
 - [x] Store server-side sessions in SQLite and use an HTTP-only cookie. (F1)
 - [x] Enforce creator and learner roles on existing editing and learning routes. (F1)
 - [x] Let a creator assign a published module to an existing learner by email. (F8)
@@ -28,10 +28,10 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 
 ### Admin account creation
 
-- [ ] Add an `/admin` entry point where an admin account can sign in and access an account-management page. (F1)
-- [ ] Add an admin role and protect the `/admin` page and its account-creation API so creator and learner accounts cannot use them. (F1)
-- [ ] Let admins create creator and learner accounts, assign each to a workspace, and validate required details and duplicate email addresses. (F1)
-- [ ] Provide a secure first-sign-in flow for new accounts, without displaying or storing plaintext passwords. (F1)
+- [x] Add an `/admin` entry point where an admin account can sign in and access an account-management page. (F1) The admin console lists workspace accounts and creates new ones.
+- [x] Add an admin role and protect the `/admin` page and its account-creation API so creator and learner accounts cannot use them. (F1) Admin membership is required; `/api/admin/*` routes return 403 for other roles and `/admin` returns 403 HTML.
+- [x] Let admins create creator and learner accounts, assign each to a workspace, and validate required details and duplicate email addresses. (F1) Name, email, role, and workspace are validated; duplicate emails return 409.
+- [x] Provide a secure first-sign-in flow for new accounts, without displaying or storing plaintext passwords. (F1) Accounts receive a seven-day, single-use `/setup#token=...` link. Only its SHA-256 hash is stored, and the account holder chooses a PBKDF2-hashed password.
 
 ## 3. Video intake and private playback
 
@@ -72,10 +72,10 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 
 ### Rework knowledge-check placement in the module editor
 
-- [ ] Let creators play and scrub the module video in the editor, then insert a knowledge check at the current playhead position instead of typing a timestamp. (F6)
-- [ ] Show knowledge-check markers on the video timeline so creators can find, select, and reposition existing checks by scrubbing to a new point. (F6)
-- [ ] Open the question editor for the selected check, preserving its question, answers, and explanation when its position changes. (F6)
-- [ ] Save the chosen video position as the check timestamp, validate it against the video duration and lesson ranges, and show the resulting interruption in learner preview. (F6, F7)
+- [x] Let creators play and scrub the module video in the editor, then insert a knowledge check at the current playhead position instead of typing a timestamp. (F6) **Add check at playhead** uses the player position; the old timestamp field is gone.
+- [x] Show knowledge-check markers on the video timeline so creators can find, select, and reposition existing checks by scrubbing to a new point. (F6) The editor timeline shows lesson bands and numbered check markers; selecting a marker seeks the player and highlights its editor card.
+- [x] Open the question editor for the selected check, preserving its question, answers, and explanation when its position changes. (F6) Moving a check reads the current form first, changes only the timestamp, then re-renders and scrolls to the selected card.
+- [x] Save the chosen video position as the check timestamp, validate it against the video duration and lesson ranges, and show the resulting interruption in learner preview. (F6, F7) Client and API checks require a position inside a lesson or at the video end; learner preview displays the same markers and pauses playback.
 
 ## 6. Learner experience, progress, and results
 

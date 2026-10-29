@@ -95,15 +95,26 @@ def test_migrations_upgrade_an_old_database():
         CREATE TABLE processing_jobs(id TEXT PRIMARY KEY, module_id TEXT);
         CREATE TABLE lessons(id TEXT PRIMARY KEY, module_id TEXT);
         CREATE TABLE questions(id TEXT PRIMARY KEY, module_id TEXT);
+        CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, password TEXT, role TEXT);
+        CREATE TABLE workspaces(id TEXT PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE memberships(workspace_id TEXT NOT NULL, user_id INTEGER NOT NULL UNIQUE, role TEXT NOT NULL CHECK(role IN ('creator','learner')), PRIMARY KEY(workspace_id,user_id), FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(user_id) REFERENCES users(id));
+        INSERT INTO workspaces VALUES('local','Local workspace');
+        INSERT INTO users VALUES(1,'admin@example.com','Admin','x','admin');
+        INSERT INTO users VALUES(2,'creator@example.com','Creator','x','creator');
+        INSERT INTO memberships VALUES('local',1,'creator');
         """
     )
     migrate(c)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 5
     module_columns = {row[1] for row in c.execute("PRAGMA table_info(modules)")}
     assert {"workspace_id", "published_version", "pass_score", "playback_video"} <= module_columns
     job_columns = {row[1] for row in c.execute("PRAGMA table_info(processing_jobs)")}
     assert {"audio_path", "transcript_state", "draft_state", "provider", "message"} <= job_columns
     assert "origin" in {row[1] for row in c.execute("PRAGMA table_info(lessons)")}
     assert c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='generated_drafts'").fetchone()
+    assert c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='account_setups'").fetchone()
+    assert c.execute("SELECT role FROM memberships WHERE user_id=1").fetchone()[0] == "creator"
+    c.execute("INSERT INTO memberships VALUES('local',2,'admin')")
+    assert c.execute("SELECT role FROM memberships WHERE user_id=2").fetchone()[0] == "admin"
     migrate(c)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 5

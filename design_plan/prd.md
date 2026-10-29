@@ -34,7 +34,7 @@ Creating training material from a video takes time: someone must identify topics
 | --- | --- |
 | Creator | Turn a video into a clear module, correct generated content, publish it, and see learner progress. |
 | Learner | Follow the video in manageable lessons, check understanding, and know whether the module is complete. |
-| Workspace administrator | Invite users and assign creator or learner access. For the first release, a creator may also act as administrator. |
+| Workspace administrator | Sign in at `/admin`, create creator and learner accounts, assign each to a workspace, and share one-time setup links. |
 
 ## 4. MVP scope
 
@@ -58,12 +58,12 @@ Creating training material from a video takes time: someone must identify topics
 
 | ID | Requirement | MVP acceptance criterion |
 | --- | --- | --- |
-| F1 | Account access | Users can sign in; creator and learner roles govern editing and viewing. A user cannot access another workspace's private modules. |
+| F1 | Account access | Users can sign in; admin, creator, and learner roles govern account management, editing, and viewing. A user cannot access another workspace's private modules. |
 | F2 | Video upload | Creator can upload MP4, MOV, or WebM. The interface shows validation errors and upload or processing state. Initial limits: 1 GB and 120 minutes, configurable by deployment. |
 | F3 | Processing | Each upload runs asynchronously through media inspection, audio extraction, transcription, and draft generation. Status is visible as queued, processing, ready, or failed. Failed jobs can be retried without another upload. |
 | F4 | Transcript | Draft transcript has timestamps and editable text. Creator can replay the corresponding video position while reviewing it. |
 | F5 | Lesson draft | Generation creates 2 to 10 ordered lessons with nonoverlapping time ranges inside the video, each with a title and short summary. Creator can add, remove, reorder, and edit lessons. |
-| F6 | Quiz draft | Generation proposes 3 to 10 multiple choice questions, each with one correct answer, an explanation, and a suggested timestamp or end position. Creator can add, remove, edit, and reposition questions. |
+| F6 | Quiz draft | Generation proposes 3 to 10 multiple choice questions, each with one correct answer, an explanation, and a suggested timestamp or end position. Creator can add, remove, edit, and reposition questions, including placing them from the video timeline at the current playhead. |
 | F7 | Publish controls | Only a creator can publish. Publishing requires a playable video, title, at least one valid lesson, and at least one valid quiz question. Draft changes do not affect the published version until republished. |
 | F8 | Learner experience | Published module displays lessons and a video player. At a question timestamp, playback pauses and an accessible question appears in the player. Submitting an answer saves it, shows feedback, and permits playback to continue. End positioned questions appear after playback. Video seeking to lesson starts works on desktop and mobile browsers. |
 | F9 | Progress | App saves the last watched position, lesson completion, answers, attempts, and score. Module completion requires viewing each lesson and submitting every required question. Passing score defaults to 70% and is configurable per module. |

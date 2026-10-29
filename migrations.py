@@ -75,11 +75,46 @@ def migration_4_generated_item_origin(c: sqlite3.Connection) -> None:
     _add_column(c, "questions", "origin", "TEXT NOT NULL DEFAULT 'manual'")
 
 
+def migration_5_admin_accounts_and_setup(c: sqlite3.Connection) -> None:
+    """Add administrator memberships and one-time account setup tokens.
+
+    SQLite cannot alter a CHECK constraint in place, so an older memberships
+    table is rebuilt only when it does not already accept the admin role.
+    """
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS account_setups(
+            token_hash TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires INTEGER NOT NULL,
+            accepted INTEGER,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )"""
+    )
+    c.execute("CREATE INDEX IF NOT EXISTS account_setups_user ON account_setups(user_id)")
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memberships'").fetchone()
+    if row and "'admin'" not in (row[0] or ""):
+        c.execute("ALTER TABLE memberships RENAME TO memberships_legacy")
+        c.execute(
+            """CREATE TABLE memberships(
+                workspace_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL UNIQUE,
+                role TEXT NOT NULL CHECK(role IN ('creator','learner','admin')),
+                PRIMARY KEY(workspace_id,user_id),
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )"""
+        )
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) SELECT workspace_id,user_id,role FROM memberships_legacy")
+        c.execute("DROP TABLE memberships_legacy")
+
+
 MIGRATIONS = (
     (1, "workspaces and published versions", migration_1_workspaces_and_versions),
     (2, "passing score and AI pipeline", migration_2_passing_score_and_ai_pipeline),
     (3, "generated drafts and events", migration_3_generated_drafts_and_events),
     (4, "generated item origin", migration_4_generated_item_origin),
+    (5, "admin accounts and one-time setup", migration_5_admin_accounts_and_setup),
 )
 
 

@@ -120,6 +120,18 @@ def creator_read(user=Depends(require_user)):
     return user
 
 
+def admin(user=Depends(require_csrf)):
+    if user["role"] != "admin" or user["workspace_role"] != "admin":
+        fail(403, "Admin access is required.")
+    return user
+
+
+def admin_read(user=Depends(require_user)):
+    if user["role"] != "admin" or user["workspace_role"] != "admin":
+        fail(403, "Admin access is required.")
+    return user
+
+
 def owned_module(c, mid, user):
     m = module_row(c, mid)
     if not m:
@@ -127,6 +139,18 @@ def owned_module(c, mid, user):
     if user["workspace_role"] != "creator" or m["workspace_id"] != user["workspace_id"] or m["owner"] != user["id"]:
         fail(403, "Creator access is required.")
     return m
+
+
+def valid_check_timestamp(c, mid, m, at):
+    """A knowledge check sits inside a lesson or at the end of the video."""
+    if at is None or at < 0 or (m["duration"] and at > m["duration"]):
+        return False
+    lessons = c.execute("SELECT start,end FROM lessons WHERE module_id=? ORDER BY start", (mid,)).fetchall()
+    if not lessons:
+        return True
+    if m["duration"] and at == m["duration"]:
+        return True
+    return any(lesson["start"] <= at <= lesson["end"] for lesson in lessons)
 
 
 def can_view(c, m, user):
@@ -144,6 +168,28 @@ def can_view(c, m, user):
 @app.get("/index.html", response_class=HTMLResponse)
 def index():
     return (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(request: Request):
+    """Serve the admin console only to an administrator or a signed-out visitor."""
+    user = current_user(request)
+    if user and (user["role"] != "admin" or user["workspace_role"] != "admin"):
+        return HTMLResponse(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<title>Admin access required</title></head><body>"
+            "<main style=\"font-family:Arial,sans-serif;max-width:520px;margin:12vh auto;padding:24px\">"
+            "<h1>Admin access required</h1><p>Sign in with an administrator account to manage accounts.</p>"
+            "<p><a href=\"/\">Return to Trainly</a></p></main></body></html>",
+            status_code=403,
+        )
+    return index()
+
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_page():
+    """Serve the one-time account setup screen."""
+    return index()
 
 
 @app.get("/app.css")
@@ -170,8 +216,9 @@ def config():
 async def login(request: Request):
     data = await body_json(request)
     email, password = data.get("email"), data.get("password")
-    if not isinstance(email, str) or not isinstance(password, str):
+    if not isinstance(email, str) or not isinstance(password, str) or not email.strip() or not password:
         fail(400, "Enter your login details.")
+    email = email.strip()
     with connection() as c:
         row = c.execute("SELECT users.*, memberships.workspace_id, memberships.role AS workspace_role FROM users JOIN memberships ON memberships.user_id=users.id WHERE email=?", (email.lower(),)).fetchone()
         if not row or not password_matches(password, row["password"]):
@@ -193,6 +240,160 @@ def logout(user=Depends(require_csrf)):
         c.execute("DELETE FROM sessions WHERE token=?", (user["token"],))
     response = JSONResponse({"ok": True})
     response.delete_cookie("trainly", secure=COOKIE_SECURE, samesite="lax")
+    return response
+
+
+EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def valid_email(value):
+    return isinstance(value, str) and bool(EMAIL_PATTERN.fullmatch(value.strip()))
+
+
+def issue_account_setup(c, user_id, now=None):
+    """Create a one-time setup token. Only its hash is stored."""
+    now = int(time.time()) if now is None else now
+    token = secrets.token_urlsafe(32)
+    expires = now + 7 * 86400
+    c.execute("DELETE FROM account_setups WHERE user_id=? AND accepted IS NULL", (user_id,))
+    c.execute(
+        "INSERT INTO account_setups(token_hash,user_id,created_at,expires) VALUES(?,?,?,?)",
+        (hashlib.sha256(token.encode()).hexdigest(), user_id, now, expires),
+    )
+    return token, expires
+
+
+def account_row(c, account_id):
+    return c.execute(
+        "SELECT users.id,users.name,users.email,users.role,"
+        "memberships.workspace_id,memberships.role AS workspace_role,"
+        "workspaces.name AS workspace_name,"
+        "(SELECT expires FROM account_setups s WHERE s.user_id=users.id AND s.accepted IS NULL ORDER BY s.expires DESC LIMIT 1) AS setup_expires,"
+        "(SELECT accepted FROM account_setups s WHERE s.user_id=users.id AND s.accepted IS NOT NULL ORDER BY s.accepted DESC LIMIT 1) AS setup_completed "
+        "FROM users JOIN memberships ON memberships.user_id=users.id "
+        "JOIN workspaces ON workspaces.id=memberships.workspace_id WHERE users.id=?",
+        (account_id,),
+    ).fetchone()
+
+
+def public_account(row):
+    if not row:
+        return None
+    item = dict(row)
+    item["setup_pending"] = item["setup_expires"] is not None and not item["setup_completed"]
+    return item
+
+
+@app.get("/api/admin/accounts")
+def admin_accounts(user=Depends(admin_read)):
+    with connection() as c:
+        rows = c.execute(
+            "SELECT users.id FROM users JOIN memberships ON memberships.user_id=users.id "
+            "JOIN workspaces ON workspaces.id=memberships.workspace_id "
+            "ORDER BY workspaces.name,users.name"
+        ).fetchall()
+        accounts = [public_account(account_row(c, row["id"])) for row in rows]
+        workspaces = [dict(row) for row in c.execute("SELECT id,name FROM workspaces ORDER BY name")]
+    return {"accounts": accounts, "workspaces": workspaces}
+
+
+@app.post("/api/admin/accounts", status_code=201)
+async def create_admin_account(request: Request, user=Depends(admin)):
+    data = await body_json(request)
+    name, email, role, workspace_id = data.get("name"), data.get("email"), data.get("role"), data.get("workspace_id")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+        fail(400, "Enter the account holder's name.")
+    if not valid_email(email):
+        fail(400, "Enter a valid email address.")
+    if role not in ("creator", "learner"):
+        fail(400, "Choose creator or learner access.")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        fail(400, "Choose a workspace for this account.")
+    email = email.strip().lower()
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        if not c.execute("SELECT 1 FROM workspaces WHERE id=?", (workspace_id,)).fetchone():
+            fail(400, "Choose an existing workspace for this account.")
+        if c.execute("SELECT 1 FROM users WHERE lower(email)=?", (email,)).fetchone():
+            fail(409, "An account already uses that email.")
+        cursor = c.execute(
+            "INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)",
+            (email, name.strip(), password_hash(secrets.token_urlsafe(32)), role),
+        )
+        account_id = cursor.lastrowid
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)", (workspace_id, account_id, role))
+        token, expires = issue_account_setup(c, account_id)
+        record_event(c, "account_created", workspace_id, user["id"], None, {"account_id": account_id, "role": role})
+        account = public_account(account_row(c, account_id))
+    return {"account": account, "token": token, "expires": expires}
+
+
+@app.post("/api/admin/accounts/{account_id}/setup", status_code=201)
+def reissue_account_setup(account_id: int, user=Depends(admin)):
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        account = account_row(c, account_id)
+        if not account:
+            fail(404, "Account not found.")
+        completed = c.execute("SELECT 1 FROM account_setups WHERE user_id=? AND accepted IS NOT NULL", (account_id,)).fetchone()
+        if completed:
+            fail(409, "This account has completed first-time setup. It cannot be reset here.")
+        if not c.execute("SELECT 1 FROM account_setups WHERE user_id=?", (account_id,)).fetchone():
+            fail(409, "This account did not use an administrator setup link.")
+        token, expires = issue_account_setup(c, account_id)
+        record_event(c, "account_setup_reissued", account["workspace_id"], user["id"], None, {"account_id": account_id})
+    return {"token": token, "expires": expires}
+
+
+def pending_account_setup(c, token):
+    if not isinstance(token, str) or not token or len(token) > 128:
+        fail(404, "Setup link not found.")
+    setup = c.execute(
+        "SELECT account_setups.*,users.name,users.email,users.role,memberships.workspace_id,"
+        "memberships.role AS workspace_role,workspaces.name AS workspace_name "
+        "FROM account_setups JOIN users ON users.id=account_setups.user_id "
+        "JOIN memberships ON memberships.user_id=users.id "
+        "JOIN workspaces ON workspaces.id=memberships.workspace_id WHERE token_hash=?",
+        (hashlib.sha256(token.encode()).hexdigest(),),
+    ).fetchone()
+    if not setup:
+        fail(404, "Setup link not found.")
+    if setup["accepted"] or setup["expires"] < int(time.time()):
+        fail(410, "This setup link has expired or was already used.")
+    return setup
+
+
+@app.post("/api/account-setup/inspect")
+async def inspect_account_setup(request: Request):
+    data = await body_json(request)
+    with connection() as c:
+        setup = pending_account_setup(c, data.get("token"))
+        return {
+            "email": setup["email"], "name": setup["name"], "role": setup["role"],
+            "workspace": setup["workspace_name"], "expires": setup["expires"],
+        }
+
+
+@app.post("/api/account-setup/complete")
+async def complete_account_setup(request: Request):
+    data = await body_json(request)
+    name, password = data.get("name"), data.get("password")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100 or not isinstance(password, str) or len(password) < 8:
+        fail(400, "Enter your name and a password of at least 8 characters.")
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        setup = pending_account_setup(c, data.get("token"))
+        if setup["role"] not in ("creator", "learner"):
+            fail(403, "This account cannot complete setup here.")
+        c.execute("UPDATE users SET name=?,password=? WHERE id=?", (name.strip(), password_hash(password), setup["user_id"]))
+        c.execute("UPDATE account_setups SET accepted=? WHERE token_hash=?", (int(time.time()), setup["token_hash"]))
+        c.execute("DELETE FROM account_setups WHERE user_id=? AND accepted IS NULL", (setup["user_id"],))
+        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+        c.execute("INSERT INTO sessions VALUES(?,?,?,?)", (token, setup["user_id"], csrf, int(time.time()) + 86400 * 14))
+        public_user = {"id": setup["user_id"], "name": name.strip(), "email": setup["email"], "role": setup["role"]}
+        record_event(c, "account_setup_completed", setup["workspace_id"], setup["user_id"], None, {"role": setup["role"]})
+    response = JSONResponse({"user": public_user, "csrf": csrf})
+    response.set_cookie("trainly", token, max_age=1209600, httponly=True, samesite="lax", secure=COOKIE_SECURE)
     return response
 
 
@@ -672,8 +873,10 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
                 at = finite_number(item.get("at"))
                 answer = item.get("answer")
                 prompt, explanation = item.get("prompt"), item.get("explanation")
-                if not isinstance(prompt, str) or not prompt.strip() or not isinstance(explanation, str) or not explanation.strip() or not isinstance(options, list) or len(options) < 2 or any(not isinstance(o, str) or not o.strip() for o in options) or type(answer) is not int or answer not in range(len(options)) or at is None or at < 0 or (m["duration"] and at > m["duration"]):
+                if not isinstance(prompt, str) or not prompt.strip() or not isinstance(explanation, str) or not explanation.strip() or not isinstance(options, list) or len(options) < 2 or any(not isinstance(o, str) or not o.strip() for o in options) or type(answer) is not int or answer not in range(len(options)):
                     fail(400, "Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.")
+                if not valid_check_timestamp(c, mid, m, at):
+                    fail(400, "Place each knowledge check inside a lesson range or at the end of the video.")
                 origin = item.get("origin", "manual") if item.get("origin") in ("manual", "generated") else "manual"
                 c.execute("INSERT INTO questions(id,module_id,ord,prompt,options,answer,explanation,at,origin) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at", (item_id, mid, i, prompt.strip(), json.dumps(options), answer, explanation, at, origin))
         if ids:
@@ -699,6 +902,8 @@ def publish(mid: str, user=Depends(creator)):
             opts = json.loads(q["options"])
             if not q["prompt"].strip() or not q["explanation"].strip() or len(opts) < 2 or q["answer"] not in range(len(opts)) or q["at"] < 0 or q["at"] > m["duration"]:
                 fail(400, "Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.")
+            if not valid_check_timestamp(c, mid, m, q["at"]):
+                fail(400, "Place each knowledge check inside a lesson range or at the end of the video.")
         version = m["published_version"] + 1
         snapshot = package(c, m, True)
         snapshot.update(status="published", version=version)

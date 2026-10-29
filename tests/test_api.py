@@ -438,6 +438,136 @@ def test_worker_records_safe_ai_failure_and_can_retry(setup_app, monkeypatch):
     (api.FILES / asset).unlink(missing_ok=True)
 
 
+def test_admin_creates_accounts_with_one_time_setup_links(setup_app):
+    api, client = setup_app
+    creator = sign_in(client, "creator@trainly.local")
+    assert client.get("/api/admin/accounts").status_code == 403
+    assert client.post("/api/admin/accounts", json={"name": "No", "email": "no@example.com", "role": "creator", "workspace_id": "local"}, headers=creator).status_code == 403
+
+    admin = sign_in(client, "admin@trainly.local")
+    overview = client.get("/api/admin/accounts")
+    assert overview.status_code == 200
+    data = overview.json()
+    assert "local" in [workspace["id"] for workspace in data["workspaces"]]
+    assert any(account["email"] == "admin@trainly.local" and account["role"] == "admin" for account in data["accounts"])
+
+    created = client.post(
+        "/api/admin/accounts",
+        json={"name": "New Creator", "email": "New.Creator@Example.com", "role": "creator", "workspace_id": "local"},
+        headers=admin,
+    )
+    assert created.status_code == 201
+    payload = created.json()
+    account = payload["account"]
+    assert account["email"] == "new.creator@example.com"
+    assert account["role"] == "creator"
+    assert account["workspace_id"] == "local"
+    assert account["setup_pending"] is True
+
+    duplicate = client.post(
+        "/api/admin/accounts",
+        json={"name": "Another", "email": "new.creator@example.com", "role": "learner", "workspace_id": "local"},
+        headers=admin,
+    )
+    assert duplicate.status_code == 409
+    assert client.post("/api/admin/accounts", json={"name": "Bad role", "email": "bad@example.com", "role": "admin", "workspace_id": "local"}, headers=admin).status_code == 400
+    assert client.post("/api/admin/accounts", json={"name": "Bad workspace", "email": "bad@example.com", "role": "learner", "workspace_id": "missing"}, headers=admin).status_code == 400
+
+    assert client.post("/api/login", json={"email": "new.creator@example.com", "password": "trainly"}).status_code == 401
+    details = client.post("/api/account-setup/inspect", json={"token": payload["token"]})
+    assert details.status_code == 200
+    assert details.json()["name"] == "New Creator"
+    assert details.json()["workspace"] == "Trainly workspace"
+    assert details.json()["role"] == "creator"
+
+    invalid = client.post("/api/account-setup/complete", json={"token": payload["token"], "name": "New Creator", "password": "short"})
+    assert invalid.status_code == 400
+    finished = client.post("/api/account-setup/complete", json={"token": payload["token"], "name": "New Creator", "password": "secure-pass-123"})
+    assert finished.status_code == 200
+    assert finished.json()["user"]["role"] == "creator"
+    assert client.post("/api/account-setup/inspect", json={"token": payload["token"]}).status_code == 410
+
+    sign_in(client, "new.creator@example.com", "secure-pass-123")
+    assert client.get("/api/modules").json() == []
+    with api.connection() as c:
+        stored_password = c.execute("SELECT password FROM users WHERE email=?", ("new.creator@example.com",)).fetchone()[0]
+        stored_token = c.execute("SELECT token_hash FROM account_setups WHERE user_id=?", (account["id"],)).fetchone()[0]
+        membership = c.execute("SELECT workspace_id,role FROM memberships WHERE user_id=?", (account["id"],)).fetchone()
+    assert "secure-pass-123" not in stored_password
+    assert stored_token != payload["token"]
+    assert tuple(membership) == ("local", "creator")
+
+    admin = sign_in(client, "admin@trainly.local")
+    assert client.post(f"/api/admin/accounts/{account['id']}/setup", headers=admin).status_code == 409
+
+
+def test_admin_can_reissue_a_pending_setup_link(setup_app):
+    _, client = setup_app
+    admin = sign_in(client, "admin@trainly.local")
+    created = client.post(
+        "/api/admin/accounts",
+        json={"name": "Pending Learner", "email": "pending@example.com", "role": "learner", "workspace_id": "local"},
+        headers=admin,
+    ).json()
+    old_token = created["token"]
+    reissued = client.post(f"/api/admin/accounts/{created['account']['id']}/setup", headers=admin)
+    assert reissued.status_code == 201
+    new_token = reissued.json()["token"]
+    assert new_token != old_token
+    assert client.post("/api/account-setup/inspect", json={"token": old_token}).status_code == 404
+    assert client.post("/api/account-setup/inspect", json={"token": new_token}).status_code == 200
+
+
+def test_admin_page_and_setup_page_access(setup_app):
+    _, client = setup_app
+    assert client.get("/admin").status_code == 200
+    assert client.get("/setup").status_code == 200
+    sign_in(client, "creator@trainly.local")
+    assert client.get("/admin").status_code == 403
+    sign_in(client, "admin@trainly.local")
+    assert client.get("/admin").status_code == 200
+
+
+def test_knowledge_checks_must_sit_inside_lessons_or_at_video_end(setup_app, monkeypatch):
+    api, client = setup_app
+    creator = sign_in(client, "creator@trainly.local")
+    mid = client.post("/api/modules", json={"title": "Check placement"}, headers=creator).json()["id"]
+    assert client.post(f"/api/modules/{mid}/upload", files={"file": ("checks.mp4", b"video bytes", "video/mp4")}, headers=creator).status_code == 202
+    assert run_worker(monkeypatch, duration=30)
+    lessons = [
+        {"title": "First", "summary": "First range", "start": 0, "end": 10},
+        {"title": "Second", "summary": "Second range", "start": 20, "end": 30},
+    ]
+    assert client.put(f"/api/modules/{mid}/lessons", json={"items": lessons}, headers=creator).status_code == 200
+
+    base = {"prompt": "Where is this?", "options": ["Here", "There"], "answer": 1, "explanation": "Because.", "at": 15}
+    assert client.put(f"/api/modules/{mid}/questions", json={"items": [base]}, headers=creator).status_code == 400
+    assert client.put(f"/api/modules/{mid}/questions", json={"items": [{**base, "at": 31}]}, headers=creator).status_code == 400
+
+    saved = client.put(f"/api/modules/{mid}/questions", json={"items": [{**base, "at": 5}]}, headers=creator)
+    assert saved.status_code == 200
+    question = saved.json()["questions"][0]
+    moved = client.put(f"/api/modules/{mid}/questions", json={"items": [{**question, "at": 25}]}, headers=creator)
+    assert moved.status_code == 200
+    moved_question = moved.json()["questions"][0]
+    assert moved_question["at"] == 25
+    assert moved_question["prompt"] == base["prompt"]
+    assert moved_question["options"] == base["options"]
+    assert moved_question["answer"] == base["answer"]
+    assert moved_question["explanation"] == base["explanation"]
+
+    assert client.put(f"/api/modules/{mid}/questions", json={"items": [{**moved_question, "at": 15}]}, headers=creator).status_code == 400
+    assert client.get(f"/api/modules/{mid}").json()["questions"][0]["at"] == 25
+    assert client.put(f"/api/modules/{mid}/questions", json={"items": [{**moved_question, "at": 30}]}, headers=creator).status_code == 200
+    assert client.patch(f"/api/modules/{mid}/publish", json={}, headers=creator).status_code == 200
+
+    with api.connection() as c:
+        c.execute("UPDATE questions SET at=15 WHERE id=?", (question["id"],))
+        video = c.execute("SELECT video FROM modules WHERE id=?", (mid,)).fetchone()[0]
+    assert client.patch(f"/api/modules/{mid}/publish", json={}, headers=creator).status_code == 400
+    (api.FILES / video).unlink(missing_ok=True)
+
+
 def test_delete_module_removes_media_and_generated_draft(setup_app, monkeypatch):
     api, client = setup_app
     creator = sign_in(client, "creator@trainly.local")

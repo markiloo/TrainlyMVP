@@ -134,7 +134,7 @@ SCHEMA = '''
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT, password TEXT, role TEXT);
 CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, name TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS memberships(workspace_id TEXT NOT NULL, user_id INTEGER NOT NULL UNIQUE, role TEXT NOT NULL CHECK(role IN ('creator','learner')), PRIMARY KEY(workspace_id,user_id), FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(user_id) REFERENCES users(id));
+CREATE TABLE IF NOT EXISTS memberships(workspace_id TEXT NOT NULL, user_id INTEGER NOT NULL UNIQUE, role TEXT NOT NULL CHECK(role IN ('creator','learner','admin')), PRIMARY KEY(workspace_id,user_id), FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS invitations(token_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, email TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('creator','learner')), module_id TEXT, created_by INTEGER NOT NULL, expires INTEGER NOT NULL, accepted INTEGER, FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(module_id) REFERENCES modules(id), FOREIGN KEY(created_by) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, csrf TEXT, expires INTEGER, FOREIGN KEY(user_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS modules(id TEXT PRIMARY KEY, owner INTEGER, workspace_id TEXT NOT NULL DEFAULT 'local', title TEXT, description TEXT DEFAULT '', video TEXT DEFAULT '', duration INTEGER DEFAULT 0, status TEXT DEFAULT 'draft', published_at INTEGER, published_version INTEGER NOT NULL DEFAULT 0, pass_score INTEGER NOT NULL DEFAULT 70, FOREIGN KEY(owner) REFERENCES users(id));
@@ -153,6 +153,8 @@ CREATE TABLE IF NOT EXISTS generated_drafts(module_id TEXT PRIMARY KEY, transcri
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, name TEXT NOT NULL, workspace_id TEXT, user_id INTEGER, module_id TEXT, created_at INTEGER NOT NULL, meta TEXT NOT NULL DEFAULT '{}');
 CREATE INDEX IF NOT EXISTS events_name_created ON events(name,created_at);
 CREATE INDEX IF NOT EXISTS events_module ON events(module_id,created_at);
+CREATE TABLE IF NOT EXISTS account_setups(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at INTEGER NOT NULL, expires INTEGER NOT NULL, accepted INTEGER, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+CREATE INDEX IF NOT EXISTS account_setups_user ON account_setups(user_id);
 '''
 def db():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row
@@ -164,7 +166,7 @@ def db():
 
 def seed():
     c=db()
-    for email,name,pwd,role in [('creator@trainly.local','Alex Morgan','trainly','creator'),('learner@trainly.local','Jamie Lee','trainly','learner')]:
+    for email,name,pwd,role in [('admin@trainly.local','Workspace Admin','trainly','admin'),('creator@trainly.local','Alex Morgan','trainly','creator'),('learner@trainly.local','Jamie Lee','trainly','learner')]:
         c.execute('INSERT OR IGNORE INTO users(email,name,password,role) VALUES(?,?,?,?)',(email,name,password_hash(pwd),role))
     if not c.execute('SELECT 1 FROM modules').fetchone():
         owner=c.execute("SELECT id FROM users WHERE role='creator'").fetchone()[0]; mid='workplace-safety'
@@ -178,10 +180,10 @@ seed()
 
 def ensure_workspace():
     c=db()
-    first_install=not c.execute("SELECT 1 FROM workspaces WHERE id='local'").fetchone()
     c.execute("INSERT OR IGNORE INTO workspaces(id,name) VALUES('local','Trainly workspace')")
-    if first_install:
-        c.execute("INSERT OR IGNORE INTO memberships(workspace_id,user_id,role) SELECT 'local',id,role FROM users WHERE role IN ('creator','learner')")
+    # Newly seeded accounts, including the administrator, join the local
+    # workspace. Accounts created by an administrator already have a membership.
+    c.execute("INSERT OR IGNORE INTO memberships(workspace_id,user_id,role) SELECT 'local',id,role FROM users WHERE id NOT IN (SELECT user_id FROM memberships)")
     c.commit();c.close()
 
 ensure_workspace()
