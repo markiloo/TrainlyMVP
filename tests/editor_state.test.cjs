@@ -3,6 +3,25 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+test('selecting a video shows a scrub-ready local preview before processing', () => {
+  const video = { style: {}, set src(value) { this.source = value; } };
+  const zone = { querySelector: () => null, insertBefore(element) { this.inserted = element; } };
+  const input = { files: [{ name: 'training.mp4' }] };
+  const document = {
+    querySelector(selector) {
+      return { '#app': {}, '#toast': {}, '#video-file': input, '.upload-zone': zone,
+        '#upload-note': { set textContent(value) { this.message = value; } } }[selector];
+    },
+    createElement(tag) { assert.equal(tag, 'video'); return video; },
+  };
+  const context = vm.createContext({ document, URL: { createObjectURL: () => 'blob:training', revokeObjectURL() {} }, setTimeout });
+  vm.runInContext(fs.readFileSync('static/app.js', 'utf8').replace(/\bboot\(\);\s*$/, ''), context);
+  vm.runInContext("S.module={id:'new-module'};renderKnowledgeTimeline=()=>{};previewSelectedVideo()", context);
+  assert.equal(zone.inserted, video);
+  assert.equal(video.source, 'blob:training');
+  assert.equal(video.controls, true);
+});
+
 test('adding another knowledge check retains typed question fields', () => {
   const buttons = new Map();
   const app = {

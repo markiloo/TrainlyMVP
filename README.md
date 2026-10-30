@@ -11,7 +11,7 @@ From this folder, install dependencies and start the server with:
 .\venv\Scripts\python.exe app.py
 ```
 
-In a second terminal, start the durable media worker:
+Running `app.py` also starts the media worker, so uploads are processed automatically. For a separate API deployment, start the durable media worker in another terminal:
 
 ```powershell
 .\venv\Scripts\python.exe worker.py

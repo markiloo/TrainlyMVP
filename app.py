@@ -1038,6 +1038,11 @@ async def answer(aid: str, request: Request, user=Depends(require_csrf)):
 
 
 if __name__ == "__main__":
+    from threading import Thread
+
     import uvicorn
+    from worker import main as run_media_worker
+
+    Thread(target=run_media_worker, name="trainly-media-worker", daemon=True).start()
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(app, host="127.0.0.1", port=port, timeout_graceful_shutdown=2)
