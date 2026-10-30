@@ -61,7 +61,8 @@ test('adding another knowledge check retains typed question fields', () => {
   const source = fs.readFileSync('static/app.js', 'utf8').replace(/\bboot\(\);\s*$/, '');
   vm.runInContext(source, context);
   vm.runInContext("S.user={name:'Creator',role:'creator'};S.module={id:'draft',title:'Training',description:'',status:'draft',video:false,duration:0,lessons:[],questions:[{id:'',prompt:'',options:['',''],answer:0,explanation:'',at:0}]};renderEditor()", context);
-  buttons.get('#addquestion').onclick();
+  assert.match(app.innerHTML, /id="add-question"[^>]*>[^<]*Add knowledge check at playhead/);
+  buttons.get('#add-question').onclick();
   const saved = vm.runInContext('S.module.questions.map(q=>({prompt:q.prompt,options:q.options,explanation:q.explanation}))', context);
   assert.equal(saved.length, 2);
   assert.equal(saved[0].prompt, 'What should I do?');
