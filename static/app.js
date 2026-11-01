@@ -5,21 +5,50 @@ function toast(s){toastEl.textContent=s;toastEl.classList.add('show');setTimeout
 async function api(path,method='GET',data){const opts={method,headers:{}};if(data instanceof FormData)opts.body=data;else if(data!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(data)}if(method!=='GET'&&method!=='HEAD')opts.headers['X-CSRF-Token']=S.csrf;const r=await fetch(path,opts);let j={};try{j=await r.json()}catch{}if(!r.ok)throw Error(j.error||'Something went wrong.');return j}
 function brand(){return '<a class="brand" href="#" data-home><span class="brand-mark">T</span>trainly</a>'}
 let displayedPage=null;
+let finishPageTransition=null;
 function pageTransition(key){
   if(displayedPage===key)return;
   const previous=displayedPage;
   displayedPage=key;
-  if(previous===null||!app.cloneNode||!document.body?.append||globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches)return;
-  const outgoing=app.cloneNode(true);
+  // A second navigation cancels the effect and shows the latest destination.
+  if(finishPageTransition){finishPageTransition();return}
+  const motion=globalThis.matchMedia?.('(prefers-reduced-motion: reduce)');
+  if(previous===null||!app.cloneNode||!document.body?.append||motion?.matches)return;
+  const snapshot=app.cloneNode(true),bounds=app.getBoundingClientRect();
+  snapshot.removeAttribute('id');
+  snapshot.querySelectorAll('[id]').forEach(el=>el.removeAttribute('id'));
+  Object.assign(snapshot.style,{position:'absolute',top:bounds.top+'px',left:bounds.left+'px',width:bounds.width+'px',margin:'0'});
+  const outgoing=document.createElement('div');
   outgoing.classList.add('page-outgoing');
   outgoing.setAttribute('aria-hidden','true');
+  outgoing.inert=true;
+  outgoing.append(snapshot);
+  const wasInert=app.inert;
+  let revealTimer,cleanupTimer;
+  const finish=()=>{
+    clearTimeout(revealTimer);
+    clearTimeout(cleanupTimer);
+    outgoing.remove();
+    app.classList.remove('page-waiting','page-entering');
+    app.inert=wasInert;
+    app.removeEventListener('animationend',onEnd);
+    motion?.removeEventListener?.('change',onMotionChange);
+    finishPageTransition=null;
+  };
+  const onEnd=e=>{if(e.target===app&&e.animationName==='page-fade-in')finish()};
+  const onMotionChange=e=>{if(e.matches)finish()};
+  finishPageTransition=finish;
+  app.inert=true;
+  app.classList.add('page-waiting');
   document.body.append(outgoing);
-  outgoing.addEventListener('animationend',()=>outgoing.remove(),{once:true});
-  setTimeout(()=>outgoing.remove(),450);
-  app.classList.remove('page-entering');
-  void app.offsetWidth;
-  app.classList.add('page-entering');
-  app.addEventListener('animationend',()=>app.classList.remove('page-entering'),{once:true});
+  app.addEventListener('animationend',onEnd);
+  motion?.addEventListener?.('change',onMotionChange);
+  revealTimer=setTimeout(()=>{
+    outgoing.remove();
+    app.classList.replace('page-waiting','page-entering');
+    app.inert=wasInert;
+  },180);
+  cleanupTimer=setTimeout(finish,560);
 }
 function shell(inner){pageTransition(S.view);app.innerHTML=`<header class="topbar">${brand()}<nav class="topnav"><span>${esc(S.user.name)} · ${S.user.role==='creator'?'Creator workspace':S.user.role==='admin'?'Admin console':'Learner space'}</span><button data-logout>Sign out</button></nav></header><main class="shell">${inner}</main>`;app.querySelector('[data-home]').onclick=e=>{e.preventDefault();home()};app.querySelector('[data-logout]').onclick=logout}
 function login(adminMode=false){
