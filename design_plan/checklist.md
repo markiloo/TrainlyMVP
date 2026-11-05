@@ -19,11 +19,11 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Seed admin, creator, and learner demo accounts and support sign-in with hashed passwords. (F1)
 - [x] Store server-side sessions in SQLite and use an HTTP-only cookie. (F1)
 - [x] Enforce creator and learner roles on existing editing and learning routes. (F1)
-- [x] Let a creator assign a published module to an existing learner by email. (F8)
+- [x] Let a creator assign a published module to an existing learner from the workspace roster. (F8)
 - [x] Add workspace and membership records, with workspace roles for creators and learners. (F1)
 - [x] Let creators invite new learners through one-use, seven-day links. (F1)
 - [x] Scope module, assignment, attempt, result, and private media queries to the user's workspace. (F1)
-- [x] Use assignment by email for existing learners and invitation links for new learners in the local MVP. (F1, F8)
+- [x] Use workspace learner selection for existing learners and invitation links for new learners in the local MVP. (F1, F8)
 - [ ] Require HTTPS and secure session cookies in deployment; review session expiry and CSRF behavior. (F1)
 
 ### Admin account creation
@@ -93,7 +93,7 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 ## 7. Replace browser prompts with app modals
 
 - [x] Replace the module-title prompt with a create-module modal that validates the title and shows API errors in context.
-- [x] Replace the learner-email prompt with an assignment modal that validates the email and preserves it if the request fails.
+- [x] Replace the learner-email prompt with an assignment modal that lists workspace learners, marks already-assigned learners, and keeps invitation links for people without accounts.
 - [x] Replace the invitation-link prompt with a share modal that displays the link, its seven-day expiry, and a copy action.
 - [x] Give each modal a clear title and cancel action; move focus into it when opened, keep keyboard focus inside it, support Escape, and return focus to the triggering control when closed.
 

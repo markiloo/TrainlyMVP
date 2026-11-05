@@ -44,6 +44,35 @@ def sign_in(client, email, password="trainly"):
     return {"X-CSRF-Token": response.json()["csrf"]}
 
 
+def test_learners_lists_only_workspace_learners_for_creators(setup_app):
+    api, client = setup_app
+    with api.connection() as c:
+        c.execute("INSERT OR IGNORE INTO workspaces(id,name) VALUES(?,?)", ("other", "Other workspace"))
+        other_id = c.execute(
+            "INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)",
+            ("other.learner@example.com", "Other Learner", api.password_hash("trainly"), "learner"),
+        ).lastrowid
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)", ("other", other_id, "learner"))
+        local_id = c.execute(
+            "INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)",
+            ("aaron.learner@example.com", "Aaron Learner", api.password_hash("trainly"), "learner"),
+        ).lastrowid
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)", ("local", local_id, "learner"))
+
+    creator = sign_in(client, "creator@trainly.local")
+    rows = client.get("/api/learners").json()
+    emails = {row["email"] for row in rows}
+    assert "learner@trainly.local" in emails
+    assert "aaron.learner@example.com" in emails
+    assert "other.learner@example.com" not in emails
+    assert [row["name"] for row in rows] == ["Aaron Learner", "Jamie Lee"]
+
+    learner = sign_in(client, "learner@trainly.local")
+    assert client.get("/api/learners", headers=learner).status_code == 403
+    admin = sign_in(client, "admin@trainly.local")
+    assert client.get("/api/learners", headers=admin).status_code == 403
+
+
 def test_learner_can_reset_video_demo_progress(setup_app):
     _, client = setup_app
     learner = sign_in(client, "learner@trainly.local")

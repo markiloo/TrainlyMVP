@@ -173,3 +173,15 @@ test('removing a choice adjusts the correct answer and preserves the video posit
   assert.equal(result.answer, 1);
   assert.equal(video.currentTime, 14);
 });
+
+test('assignment dropdown disables learners already assigned and escapes labels', () => {
+  const context = vm.createContext({ document: { querySelector: () => ({}) }, setTimeout });
+  vm.runInContext(fs.readFileSync('static/app.js', 'utf8').replace(/\bboot\(\);\s*$/, ''), context);
+  const html = vm.runInContext(
+    "learnerOptions([{name:'Jamie Lee',email:'jamie@example.com'},{name:'Sam <Admin>',email:'sam@example.com'}],new Set(['jamie@example.com']))",
+    context,
+  );
+  assert.match(html, /<option value="jamie@example.com" disabled>Jamie Lee &mdash; jamie@example.com \(already assigned\)<\/option>/);
+  assert.match(html, /<option value="sam@example.com">Sam &lt;Admin&gt; &mdash; sam@example.com<\/option>/);
+  assert.equal(vm.runInContext("learnerOptions([],new Set())", context), '');
+});
