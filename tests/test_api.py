@@ -718,6 +718,46 @@ def test_creator_declines_then_calls_back_and_learner_accepts(setup_app):
             assert creator_ws.receive_json()["type"] == "call.ended"
 
 
+def test_windows_transport_reset_noise_is_suppressed(setup_app):
+    api, _ = setup_app
+
+    class Loop:
+        def __init__(self):
+            self.contexts = []
+
+        def default_exception_handler(self, context):
+            self.contexts.append(context)
+
+    loop = Loop()
+    reset = {
+        "message": "Exception in callback _ProactorBasePipeTransport._call_connection_lost()",
+        "exception": ConnectionResetError(10054, "An existing connection was forcibly closed"),
+    }
+    api.handle_loop_exception(loop, reset)
+    assert loop.contexts == []
+
+    api.handle_loop_exception(
+        loop,
+        {
+            "message": "Exception in callback _ProactorBasePipeTransport._call_connection_lost()",
+            "exception": ConnectionAbortedError(10053, "An established connection was aborted"),
+        },
+    )
+    assert loop.contexts == []
+
+    api.handle_loop_exception(loop, {**reset, "message": "A different callback"})
+    assert len(loop.contexts) == 1
+
+    api.handle_loop_exception(
+        loop,
+        {
+            "message": "Exception in callback _ProactorBasePipeTransport._call_connection_lost()",
+            "exception": ValueError("boom"),
+        },
+    )
+    assert len(loop.contexts) == 2
+
+
 def test_call_socket_requires_a_valid_session(setup_app):
     _, client = setup_app
     with pytest.raises(WebSocketDisconnect) as closed:

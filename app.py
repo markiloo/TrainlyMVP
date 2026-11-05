@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import logging
@@ -10,7 +11,7 @@ import re
 import secrets
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,8 +25,34 @@ from data import (
 )
 from providers import ai_status
 
-app = FastAPI(title="Trainly", docs_url=None, redoc_url=None)
 logger = logging.getLogger("trainly")
+
+
+def handle_loop_exception(loop, context):
+    """Ignore Windows sockets reset by a browser cancelling a media range.
+
+    CPython's Proactor transport reports WSAECONNRESET while shutting down a
+    socket after the client aborts a 206 response. The request already
+    completed; only the transport teardown is noisy. Everything else still goes
+    through the loop's normal exception handler.
+    """
+    error = context.get("exception")
+    message = str(context.get("message", ""))
+    if (
+        isinstance(error, (ConnectionResetError, ConnectionAbortedError))
+        and "_ProactorBasePipeTransport._call_connection_lost" in message
+    ):
+        return
+    loop.default_exception_handler(context)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    asyncio.get_running_loop().set_exception_handler(handle_loop_exception)
+    yield
+
+
+app = FastAPI(title="Trainly", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 @app.middleware("http")
