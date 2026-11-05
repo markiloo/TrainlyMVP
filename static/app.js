@@ -394,6 +394,52 @@ function showQuestion(q){if(S.asked.has(q.id)||S.activeQuestion)return;S.activeQ
 async function logout(){const adminMode=location.pathname==='/admin';stopCallSocket();await api('/api/logout','POST',{}).catch(()=>{});S.user=null;S.csrf='';S.admin=null;login(adminMode)}
 const CALL_MEDIA={video:{width:{ideal:1280},height:{ideal:720},facingMode:'user'},audio:true};
 
+// Local call alerts never enter the WebRTC media stream.
+const callSound={context:null,key:null,timer:null,nodes:new Set()};
+function stopCallSound(){
+  callSound.key=null;clearTimeout(callSound.timer);callSound.timer=null;
+  for(const node of callSound.nodes){try{node.stop()}catch{}try{node.disconnect()}catch{}}
+  callSound.nodes.clear();
+}
+function unlockCallSound(){
+  try{
+    const Audio=globalThis.AudioContext||globalThis.webkitAudioContext;
+    if(!Audio)return;
+    if(!callSound.context)callSound.context=new Audio();
+    if(callSound.context.state==='suspended')Promise.resolve(callSound.context.resume()).then(()=>{if(callSound.key)playCallSound(callSound.key)}).catch(()=>{});
+    else if(callSound.key)playCallSound(callSound.key);
+  }catch{}
+}
+function playCallSound(key){
+  if(callSound.key!==key||callSound.timer||callSound.context?.state!=='running')return;
+  const context=callSound.context,incoming=key.endsWith(':incoming');
+  try{
+    const beep=(offset,duration,frequencies)=>{
+      const start=context.currentTime+offset,gain=context.createGain();
+      gain.gain.setValueAtTime(0,start);gain.gain.linearRampToValueAtTime(.045,start+.02);
+      gain.gain.setValueAtTime(.045,start+duration-.03);gain.gain.linearRampToValueAtTime(0,start+duration);
+      gain.connect(context.destination);
+      let remaining=frequencies.length;
+      for(const frequency of frequencies){
+        const node=context.createOscillator();node.frequency.value=frequency;node.connect(gain);callSound.nodes.add(node);
+        node.onended=()=>{callSound.nodes.delete(node);node.disconnect();if(!--remaining)gain.disconnect()};
+        node.start(start);node.stop(start+duration);
+      }
+    };
+    if(incoming){beep(0,.2,[660]);beep(.35,.2,[660])}else beep(0,2,[440,480]);
+    callSound.timer=setTimeout(()=>{callSound.timer=null;playCallSound(key)},incoming?3000:6000);
+  }catch{stopCallSound()}
+}
+function startCallSound(id,direction){
+  const key=id+':'+direction;
+  if(callSound.key===key)return;
+  stopCallSound();callSound.key=key;unlockCallSound();
+}
+if(typeof document.addEventListener==='function'){
+  document.addEventListener('pointerdown',unlockCallSound,{passive:true});
+  document.addEventListener('keydown',unlockCallSound);
+}
+
 function connectCallSocket(){
   if(!S.user||S.user.role==='admin'||S.callSocket||S.callSocketStopped)return;
   let socket;
@@ -432,6 +478,7 @@ async function handleCallSocket(message){
     return;
   }
   if(type==='call.accepted'){
+    if(callSound.key?.startsWith(message.call?.id+':'))stopCallSound();
     if(S.call&&S.call.call.id===message.call?.id){
       S.call.call=message.call;S.call.status='active';clearCallTimer();updateCallStatus('Connected.');
       if(S.call.role==='learner'&&!S.call.pc)setupLearnerPeer();
@@ -496,6 +543,7 @@ async function loadLearnerCallHistory(moduleId){
 }
 
 async function callModuleCreator(moduleId){
+  unlockCallSound();
   if(S.call)return toast('A call is already in progress.');
   let stream;
   try{stream=await navigator.mediaDevices.getUserMedia(CALL_MEDIA)}catch{return toast('Camera and microphone access is required to start a call.')}
@@ -504,10 +552,12 @@ async function callModuleCreator(moduleId){
     if(call.status!=='ringing'){stopStream(stream);toast('The creator is offline. Your call was saved to their inbox.');refreshInbox();return}
     openCallOverlay(call,'learner',stream);
     setCallRingingTimer(call.id,'learner');
+    startCallSound(call.id,'outgoing');
   }catch(error){stopStream(stream);toast(error.message)}
 }
 
 async function callBack(callId){
+  unlockCallSound();
   if(S.call)return toast('A call is already in progress.');
   let stream=null;
   try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch{toast('Microphone access was unavailable. You can still watch and annotate.')}
@@ -517,6 +567,7 @@ async function callBack(callId){
     openCallOverlay(call,'creator',stream);
     setupCreatorPeer(call,stream);
     setCallRingingTimer(call.id,'creator');
+    startCallSound(call.id,'outgoing');
   }catch(error){stopStream(stream);toast(error.message)}
 }
 
@@ -536,17 +587,19 @@ function showIncomingCall(call){
   let handled=false;
   const who=S.user.role==='creator'?call.learner:call.creator;
   const dialog=appModal(S.user.role==='creator'?'Incoming call':'Creator is calling',`<p><strong>${esc(who.name)}</strong> is calling about <strong>${esc(call.module.title)}</strong>.</p><p class="hint">${S.user.role==='creator'?'The learner shares their camera and microphone; you share your microphone. Calls are not recorded.':'Accepting shares your camera and microphone with the creator. Calls are not recorded.'}</p>`,async(_,close)=>{
+    stopCallSound();
     const accepted=await acceptIncomingCall(call);
     handled=true;S.incomingCall=null;S.incomingDialog=null;close();
     if(!accepted)return;
   });
   S.incomingDialog=dialog;
+  startCallSound(call.id,'incoming');
   dialog.querySelector('[data-submit]').textContent='Accept';
   const decline=dialog.querySelector('[data-cancel]');
   decline.textContent='Decline';
-  decline.onclick=async()=>{if(handled)return;handled=true;S.incomingCall=null;S.incomingDialog=null;dialog.close();await declineIncomingCall(call).catch(()=>{})};
-  dialog.addEventListener('cancel',()=>{if(handled)return;handled=true;S.incomingCall=null;S.incomingDialog=null;declineIncomingCall(call).catch(()=>{})});
-  dialog.addEventListener('close',()=>{if(S.incomingDialog===dialog)S.incomingDialog=null;if(S.incomingCall?.id===call.id)S.incomingCall=null;},{once:true});
+  decline.onclick=async()=>{if(handled)return;stopCallSound();handled=true;S.incomingCall=null;S.incomingDialog=null;dialog.close();await declineIncomingCall(call).catch(()=>{})};
+  dialog.addEventListener('cancel',()=>{if(handled)return;stopCallSound();handled=true;S.incomingCall=null;S.incomingDialog=null;declineIncomingCall(call).catch(()=>{})});
+  dialog.addEventListener('close',()=>{if(callSound.key===call.id+':incoming')stopCallSound();if(S.incomingDialog===dialog)S.incomingDialog=null;if(S.incomingCall?.id===call.id)S.incomingCall=null;},{once:true});
 }
 
 async function acceptIncomingCall(call){
@@ -573,6 +626,7 @@ async function declineIncomingCall(call){
 }
 
 function closeIncomingDialog(){
+  stopCallSound();
   S.incomingCall=null;
   const dialog=S.incomingDialog;S.incomingDialog=null;
   if(dialog){try{dialog.close()}catch{}}
@@ -605,6 +659,7 @@ function updateCallStatus(text){const el=document.querySelector('#call-status');
 function stopStream(stream){if(stream)stream.getTracks().forEach(track=>{try{track.stop()}catch{}})}
 
 function closeCallOverlay(){
+  stopCallSound();
   const call=S.call;
   if(call){
     clearCallTimer();
@@ -622,6 +677,7 @@ function closeCallOverlay(){
 function abortCall(message){closeCallOverlay();toast(message)}
 
 async function hangUpCall(){
+  stopCallSound();
   const current=S.call;
   if(!current)return;
   const call=current.call;

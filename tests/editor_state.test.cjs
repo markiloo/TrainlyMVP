@@ -238,3 +238,22 @@ test('creator call inbox renders statuses and callback actions', async () => {
   assert.match(target.innerHTML, /Missed/);
   assert.match(target.innerHTML, /Call back/);
 });
+
+test('call sounds repeat without overlap and stop pending playback', () => {
+  const tones=[], timers=new Map();let next=0;
+  class AudioContext {
+    state='running';currentTime=0;destination={};
+    createGain(){return {gain:{setValueAtTime(){},linearRampToValueAtTime(){}},connect(){},disconnect(){}}}
+    createOscillator(){const node={frequency:{value:0},connect(){},disconnect(){},start(){tones.push(this.frequency.value)},stop(){}};return node}
+  }
+  const context=vm.createContext({document:{querySelector:()=>({})},AudioContext,setTimeout:(fn,ms)=>{timers.set(++next,{fn,ms});return next},clearTimeout:id=>timers.delete(id)});
+  vm.runInContext(fs.readFileSync('static/app.js','utf8').replace(/\bboot\(\);\s*$/,''),context);
+  vm.runInContext("startCallSound('a','outgoing');startCallSound('a','outgoing')",context);
+  assert.deepEqual(tones,[440,480]);assert.equal(timers.size,1);
+  assert.equal([...timers.values()][0].ms,6000);
+  vm.runInContext("startCallSound('b','incoming')",context);
+  assert.deepEqual(tones,[440,480,660,660]);assert.equal(timers.size,1);
+  const stale=[...timers.values()][0].fn;
+  vm.runInContext('stopCallSound()',context);stale();
+  assert.equal(timers.size,0);assert.equal(tones.length,4);
+});
