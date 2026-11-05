@@ -105,7 +105,7 @@ def test_migrations_upgrade_an_old_database():
         """
     )
     migrate(c)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 6
     module_columns = {row[1] for row in c.execute("PRAGMA table_info(modules)")}
     assert {"workspace_id", "published_version", "pass_score", "playback_video"} <= module_columns
     job_columns = {row[1] for row in c.execute("PRAGMA table_info(processing_jobs)")}
@@ -113,8 +113,9 @@ def test_migrations_upgrade_an_old_database():
     assert "origin" in {row[1] for row in c.execute("PRAGMA table_info(lessons)")}
     assert c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='generated_drafts'").fetchone()
     assert c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='account_setups'").fetchone()
+    assert c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='calls'").fetchone()
     assert c.execute("SELECT role FROM memberships WHERE user_id=1").fetchone()[0] == "creator"
     c.execute("INSERT INTO memberships VALUES('local',2,'admin')")
     assert c.execute("SELECT role FROM memberships WHERE user_id=2").fetchone()[0] == "admin"
     migrate(c)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 6

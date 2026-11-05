@@ -155,6 +155,9 @@ CREATE INDEX IF NOT EXISTS events_name_created ON events(name,created_at);
 CREATE INDEX IF NOT EXISTS events_module ON events(module_id,created_at);
 CREATE TABLE IF NOT EXISTS account_setups(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at INTEGER NOT NULL, expires INTEGER NOT NULL, accepted INTEGER, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS account_setups_user ON account_setups(user_id);
+CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, module_id TEXT NOT NULL, learner INTEGER NOT NULL, creator INTEGER NOT NULL, initiated_by TEXT NOT NULL DEFAULT 'learner', status TEXT NOT NULL DEFAULT 'ringing', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, accepted_at INTEGER, ended_at INTEGER, duration INTEGER, ended_by INTEGER, failure_reason TEXT, FOREIGN KEY(workspace_id) REFERENCES workspaces(id), FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE, FOREIGN KEY(learner) REFERENCES users(id), FOREIGN KEY(creator) REFERENCES users(id));
+CREATE INDEX IF NOT EXISTS calls_creator_created ON calls(creator,created_at);
+CREATE INDEX IF NOT EXISTS calls_learner_created ON calls(learner,created_at);
 '''
 def db():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row

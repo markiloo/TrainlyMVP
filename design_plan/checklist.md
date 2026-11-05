@@ -90,6 +90,19 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Add a per-module passing score, defaulting to 70%, and report pass/not-pass separately from completion. (F9) Deciding whether passing is required for completion remains open with the assessment decision in PRD Section 10.
 - [x] Retry or reconcile failed progress saves without losing a learner's place or duplicating answers. (F9, F11) The browser retries progress saves with backoff and keeps the latest pending checkpoint.
 
+### Learner calls and call inbox
+
+- [x] Let an assigned learner start a one-to-one call from a published module; the learner shares camera and microphone and the creator shares microphone audio. The learner is the WebRTC offerer in both call directions.
+- [x] Add creator annotation over the live learner video using a WebRTC data channel, with pen colors, size, undo, clear, and responsive coordinate mapping. Annotations are live-only and are not stored.
+- [x] Add a durable `calls` table with workspace and module scoping, direction, status, timestamps, duration, and safe failure reasons.
+- [x] Add a creator **Calls** inbox with incoming, missed, declined, cancelled, and completed calls, plus call back when the learner is online.
+- [x] Ring signed-in creators and learners through `/ws/calls`; ring timeouts become missed calls and can be reconciled without a background worker.
+- [x] Relay WebRTC offers, answers, and ICE candidates only between the two call participants while the call is active.
+- [x] Close ringing or active calls when the last browser connection for a participant disconnects.
+- [x] Store call metadata only; do not record or log call media, SDP, ICE, or annotation data.
+- [ ] Provide and operate a TURN service for reliable calls across networks; STUN is configurable but not sufficient for every network. (F8)
+- [ ] Add production HTTPS so camera and microphone capture works outside localhost. (F1, F8)
+
 ## 7. Replace browser prompts with app modals
 
 - [x] Replace the module-title prompt with a create-module modal that validates the title and shows API errors in context.

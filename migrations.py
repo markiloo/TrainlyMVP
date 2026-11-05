@@ -109,12 +109,41 @@ def migration_5_admin_accounts_and_setup(c: sqlite3.Connection) -> None:
         c.execute("DROP TABLE memberships_legacy")
 
 
+def migration_6_call_inbox(c: sqlite3.Connection) -> None:
+    """Store learner-to-creator call requests, history, and durations."""
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS calls(
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            module_id TEXT NOT NULL,
+            learner INTEGER NOT NULL,
+            creator INTEGER NOT NULL,
+            initiated_by TEXT NOT NULL DEFAULT 'learner',
+            status TEXT NOT NULL DEFAULT 'ringing',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            accepted_at INTEGER,
+            ended_at INTEGER,
+            duration INTEGER,
+            ended_by INTEGER,
+            failure_reason TEXT,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+            FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE,
+            FOREIGN KEY(learner) REFERENCES users(id),
+            FOREIGN KEY(creator) REFERENCES users(id)
+        )"""
+    )
+    c.execute("CREATE INDEX IF NOT EXISTS calls_creator_created ON calls(creator,created_at)")
+    c.execute("CREATE INDEX IF NOT EXISTS calls_learner_created ON calls(learner,created_at)")
+
+
 MIGRATIONS = (
     (1, "workspaces and published versions", migration_1_workspaces_and_versions),
     (2, "passing score and AI pipeline", migration_2_passing_score_and_ai_pipeline),
     (3, "generated drafts and events", migration_3_generated_drafts_and_events),
     (4, "generated item origin", migration_4_generated_item_origin),
     (5, "admin accounts and one-time setup", migration_5_admin_accounts_and_setup),
+    (6, "call inbox", migration_6_call_inbox),
 )
 
 

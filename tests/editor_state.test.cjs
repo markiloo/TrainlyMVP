@@ -185,3 +185,56 @@ test('assignment dropdown disables learners already assigned and escapes labels'
   assert.match(html, /<option value="sam@example.com">Sam &lt;Admin&gt; &mdash; sam@example.com<\/option>/);
   assert.equal(vm.runInContext("learnerOptions([],new Set())", context), '');
 });
+
+test('call helpers align video content and collect live annotation strokes', () => {
+  const context = vm.createContext({ document: { querySelector: () => ({}) }, setTimeout });
+  vm.runInContext(fs.readFileSync('static/app.js', 'utf8').replace(/\bboot\(\);\s*$/, ''), context);
+  const rect = vm.runInContext(
+    "videoContentRect({getBoundingClientRect:()=>({left:10,top:20,width:320,height:180}),videoWidth:360,videoHeight:640},{getBoundingClientRect:()=>({left:10,top:20})})",
+    context,
+  );
+  assert.equal(rect.w, 101.25);
+  assert.equal(rect.h, 180);
+  assert.equal(rect.x, 109.375);
+  assert.equal(rect.y, 0);
+  assert.equal(vm.runInContext("callDuration(125)", context), '2:05');
+  assert.equal(vm.runInContext("callStatusLabel('missed')", context), 'Missed');
+  vm.runInContext(
+    "S.call={strokes:[]};handleAnnotation({type:'stroke-start',id:'a',color:'#fff',width:4});handleAnnotation({type:'stroke-point',id:'a',points:[[0.1,0.2],[0.2,0.3]]});",
+    context,
+  );
+  const strokes = vm.runInContext('S.call.strokes', context);
+  assert.equal(strokes.length, 1);
+  assert.equal(JSON.stringify(strokes[0].points), JSON.stringify([[0.1, 0.2], [0.2, 0.3]]));
+  vm.runInContext("handleAnnotation({type:'undo'})", context);
+  assert.equal(vm.runInContext('S.call.strokes.length', context), 0);
+});
+
+test('creator call inbox renders statuses and callback actions', async () => {
+  const target = {
+    innerHTML: '',
+    querySelector: () => ({ append() {} }),
+  };
+  const document = {
+    querySelector(selector) {
+      if (selector === '#main-content') return target;
+      if (selector === '#app') return {};
+      if (selector === '#toast') return { classList: { add() {}, remove() {} } };
+      if (selector === '.titlebar') return { append() {} };
+      return null;
+    },
+    querySelectorAll: () => [],
+    createElement: () => ({}),
+  };
+  const context = vm.createContext({ document, setTimeout });
+  vm.runInContext(fs.readFileSync('static/app.js', 'utf8').replace(/\bboot\(\);\s*$/, ''), context);
+  vm.runInContext(
+    "api=async()=>[{id:'c1',status:'missed',created_at:1700000000,initiated_by:'learner',duration:null,learner:{name:'Jamie Lee',email:'jamie@example.com'},module:{id:'m1',title:'Safety'},learner_online:true}]",
+    context,
+  );
+  await vm.runInContext('renderCalls()', context);
+  assert.match(target.innerHTML, /Jamie Lee/);
+  assert.match(target.innerHTML, /Safety/);
+  assert.match(target.innerHTML, /Missed/);
+  assert.match(target.innerHTML, /Call back/);
+});

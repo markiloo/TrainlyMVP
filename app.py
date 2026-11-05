@@ -12,8 +12,9 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from data import (
@@ -58,6 +59,64 @@ def fail(status: int, message: str):
     raise HTTPException(status_code=status, detail=message)
 
 
+CALL_RING_SECONDS = 45
+CALL_ACTIVE_RECONCILE_SECONDS = 4 * 60 * 60
+
+
+class CallHub:
+    """Per-process WebSocket presence and call event delivery.
+
+    The MVP runs one app worker. Multi-worker deployments need a shared
+    pub/sub channel instead of this in-memory registry.
+    """
+
+    def __init__(self):
+        self.connections: dict[int, set[WebSocket]] = {}
+
+    def add(self, user_id: int, socket: WebSocket) -> None:
+        self.connections.setdefault(user_id, set()).add(socket)
+
+    def remove(self, user_id: int, socket: WebSocket) -> None:
+        sockets = self.connections.get(user_id)
+        if sockets:
+            sockets.discard(socket)
+            if not sockets:
+                self.connections.pop(user_id, None)
+
+    def online(self, user_id: int) -> bool:
+        return bool(self.connections.get(user_id))
+
+    async def send(self, user_id: int, message: dict, exclude=None) -> None:
+        for socket in list(self.connections.get(user_id, ())):
+            if socket is exclude:
+                continue
+            try:
+                await socket.send_json(message)
+            except Exception:
+                self.remove(user_id, socket)
+
+
+hub = CallHub()
+
+
+def configured_ice_servers():
+    servers = []
+    stun_urls = [url.strip() for url in os.environ.get("TRAINLY_STUN_URLS", "stun:stun.l.google.com:19302").split(",") if url.strip()]
+    if stun_urls:
+        servers.append({"urls": stun_urls})
+    turn_urls = [url.strip() for url in os.environ.get("TRAINLY_TURN_URLS", "").split(",") if url.strip()]
+    if turn_urls:
+        server = {"urls": turn_urls}
+        username = os.environ.get("TRAINLY_TURN_USERNAME", "").strip()
+        credential = os.environ.get("TRAINLY_TURN_CREDENTIAL", "").strip()
+        if username:
+            server["username"] = username
+        if credential:
+            server["credential"] = credential
+        servers.append(server)
+    return servers
+
+
 def video_size_label():
     if MAX_VIDEO_BYTES >= 1024 ** 3:
         return f"{MAX_VIDEO_BYTES / (1024 ** 3):g} GiB"
@@ -81,8 +140,7 @@ async def body_json(request: Request):
     return value
 
 
-def current_user(request: Request):
-    token = request.cookies.get("trainly")
+def user_for_session(token):
     if not token:
         return None
     with connection() as c:
@@ -94,6 +152,10 @@ def current_user(request: Request):
             (token,),
         ).fetchone()
         return dict(row) if row and row["expires"] >= int(time.time()) else None
+
+
+def current_user(request: Request):
+    return user_for_session(request.cookies.get("trainly"))
 
 
 def require_user(user=Depends(current_user)):
@@ -164,6 +226,80 @@ def can_view(c, m, user):
     )
 
 
+CALL_QUERY = """SELECT calls.*, modules.title AS module_title,
+    learner.name AS learner_name, learner.email AS learner_email,
+    creator.name AS creator_name, creator.email AS creator_email
+    FROM calls JOIN modules ON modules.id=calls.module_id
+    JOIN users learner ON learner.id=calls.learner
+    JOIN users creator ON creator.id=calls.creator"""
+
+
+def call_row(c, call_id):
+    return c.execute(CALL_QUERY + " WHERE calls.id=?", (call_id,)).fetchone()
+
+
+def public_call(c, row):
+    return {
+        "id": row["id"],
+        "module": {"id": row["module_id"], "title": row["module_title"]},
+        "learner": {"id": row["learner"], "name": row["learner_name"], "email": row["learner_email"]},
+        "creator": {"id": row["creator"], "name": row["creator_name"], "email": row["creator_email"]},
+        "initiated_by": row["initiated_by"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "accepted_at": row["accepted_at"],
+        "ended_at": row["ended_at"],
+        "duration": row["duration"],
+        "failure_reason": row["failure_reason"],
+        "learner_online": hub.online(row["learner"]),
+        "creator_online": hub.online(row["creator"]),
+    }
+
+
+def reconcile_calls(c):
+    """Close calls that can no longer be answered or have gone stale."""
+    now = int(time.time())
+    c.execute(
+        "UPDATE calls SET status='missed',updated_at=?,ended_at=COALESCE(ended_at,?),failure_reason='No answer' "
+        "WHERE status='ringing' AND created_at<?",
+        (now, now, now - CALL_RING_SECONDS),
+    )
+    c.execute(
+        "UPDATE calls SET status='ended',updated_at=?,ended_at=COALESCE(ended_at,?),"
+        "duration=COALESCE(duration,?-COALESCE(accepted_at,created_at)) "
+        "WHERE status='active' AND updated_at<?",
+        (now, now, now, now - CALL_ACTIVE_RECONCILE_SECONDS),
+    )
+
+
+def busy_with_call(c, user_id, exclude=None):
+    query = "SELECT 1 FROM calls WHERE status IN ('ringing','active') AND (learner=? OR creator=?)"
+    params = [user_id, user_id]
+    if exclude:
+        query += " AND id<>?"
+        params.append(exclude)
+    return bool(c.execute(query, params).fetchone())
+
+
+def call_initiator(row):
+    return row["learner"] if row["initiated_by"] == "learner" else row["creator"]
+
+
+def call_callee(row):
+    return row["creator"] if row["initiated_by"] == "learner" else row["learner"]
+
+
+def finish_call(c, row, status, user_id, reason=None):
+    now = int(time.time())
+    duration = None
+    if status in ("ended", "failed") and row["accepted_at"]:
+        duration = max(0, now - row["accepted_at"])
+    c.execute(
+        "UPDATE calls SET status=?,updated_at=?,ended_at=?,duration=?,ended_by=?,failure_reason=? WHERE id=?",
+        (status, now, now, duration, user_id, reason, row["id"]),
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 @app.get("/index.html", response_class=HTMLResponse)
 def index():
@@ -209,7 +345,14 @@ def me(user=Depends(current_user)):
 
 @app.get("/api/config")
 def config():
-    return {"max_video_bytes": MAX_VIDEO_BYTES, "max_video_seconds": MAX_VIDEO_SECONDS, "default_pass_score": 70, **ai_status()}
+    return {
+        "max_video_bytes": MAX_VIDEO_BYTES,
+        "max_video_seconds": MAX_VIDEO_SECONDS,
+        "default_pass_score": 70,
+        "ice_servers": configured_ice_servers(),
+        "call_ring_seconds": CALL_RING_SECONDS,
+        **ai_status(),
+    }
 
 
 @app.post("/api/login")
@@ -466,6 +609,7 @@ def delete_module(mid: str, user=Depends(creator)):
         c.execute("DELETE FROM answers WHERE attempt_id IN (SELECT id FROM attempts WHERE module_id=?)", (mid,))
         c.execute("DELETE FROM attempt_progress WHERE attempt_id IN (SELECT id FROM attempts WHERE module_id=?)", (mid,))
         c.execute("DELETE FROM attempts WHERE module_id=?", (mid,))
+        c.execute("DELETE FROM calls WHERE module_id=?", (mid,))
         c.execute("DELETE FROM module_versions WHERE module_id=?", (mid,))
         c.execute("DELETE FROM modules WHERE id=?", (mid,))
         record_event(c, "module_deleted", user["workspace_id"], user["id"], mid)
@@ -578,6 +722,177 @@ async def accept_invitation(request: Request):
     response = JSONResponse({"user": public_user, "csrf": csrf})
     response.set_cookie("trainly", token, max_age=1209600, httponly=True, samesite="lax", secure=COOKIE_SECURE)
     return response
+
+
+@app.get("/api/calls")
+async def list_calls(user=Depends(require_user)):
+    if user["workspace_role"] not in ("creator", "learner"):
+        fail(403, "Call access is required.")
+    with connection() as c:
+        reconcile_calls(c)
+        column = "creator" if user["workspace_role"] == "creator" else "learner"
+        rows = c.execute(
+            CALL_QUERY + f" WHERE calls.{column}=? ORDER BY calls.created_at DESC,calls.id DESC LIMIT 100",
+            (user["id"],),
+        ).fetchall()
+        return [public_call(c, row) for row in rows]
+
+
+@app.post("/api/calls", status_code=201)
+async def start_call(request: Request, user=Depends(require_csrf)):
+    data = await body_json(request)
+    mid = data.get("module_id")
+    if not isinstance(mid, str) or not mid:
+        fail(400, "Choose a module to call about.")
+    creator_id = None
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        m = module_row(c, mid)
+        if not m or not m["owner"] or user["workspace_role"] != "learner" or not can_view(c, m, user):
+            fail(404, "Assigned published module not found.")
+        creator_id = m["owner"]
+        reconcile_calls(c)
+        if busy_with_call(c, user["id"]) or busy_with_call(c, creator_id):
+            fail(409, "A call is already in progress. Try again when it ends.")
+        now = int(time.time())
+        call_id = uuid.uuid4().hex
+        online = hub.online(creator_id)
+        status = "ringing" if online else "missed"
+        c.execute(
+            "INSERT INTO calls(id,workspace_id,module_id,learner,creator,initiated_by,status,created_at,updated_at,ended_at,failure_reason) "
+            "VALUES(?,?,?,?,?,'learner',?,?,?,?,?)",
+            (call_id, user["workspace_id"], mid, user["id"], creator_id, status, now, now, None if online else now, None if online else "Creator offline"),
+        )
+        result = public_call(c, call_row(c, call_id))
+        record_event(c, "call_started", user["workspace_id"], user["id"], mid, {"call_id": call_id, "creator_online": online})
+    if result["status"] == "ringing":
+        await hub.send(creator_id, {"type": "call.incoming", "call": result})
+    return result
+
+
+@app.post("/api/calls/{call_id}/accept")
+async def accept_call(call_id: str, user=Depends(require_csrf)):
+    initiator_id = None
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = call_row(c, call_id)
+        if not row or call_callee(row) != user["id"]:
+            fail(404, "Call not found.")
+        if row["status"] != "ringing":
+            fail(409, "This call is no longer ringing.")
+        if row["created_at"] < int(time.time()) - CALL_RING_SECONDS:
+            fail(410, "This call timed out.")
+        if busy_with_call(c, row["learner"], exclude=row["id"]) or busy_with_call(c, row["creator"], exclude=row["id"]):
+            fail(409, "A call is already in progress. Try again when it ends.")
+        now = int(time.time())
+        c.execute("UPDATE calls SET status='active',accepted_at=?,updated_at=?,failure_reason=NULL WHERE id=?", (now, now, call_id))
+        result = public_call(c, call_row(c, call_id))
+        initiator_id = call_initiator(row)
+        record_event(c, "call_accepted", user["workspace_id"], user["id"], row["module_id"], {"call_id": call_id})
+    await hub.send(initiator_id, {"type": "call.accepted", "call": result})
+    await hub.send(user["id"], {"type": "call.handled", "call": result})
+    return result
+
+
+@app.post("/api/calls/{call_id}/decline")
+async def decline_call(call_id: str, user=Depends(require_csrf)):
+    initiator_id = None
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = call_row(c, call_id)
+        if not row or call_callee(row) != user["id"]:
+            fail(404, "Call not found.")
+        if row["status"] != "ringing":
+            fail(409, "This call is no longer ringing.")
+        finish_call(c, row, "declined", user["id"], "Declined")
+        result = public_call(c, call_row(c, call_id))
+        initiator_id = call_initiator(row)
+        record_event(c, "call_declined", user["workspace_id"], user["id"], row["module_id"], {"call_id": call_id})
+    await hub.send(initiator_id, {"type": "call.declined", "call": result})
+    await hub.send(user["id"], {"type": "call.handled", "call": result})
+    return result
+
+
+@app.post("/api/calls/{call_id}/cancel")
+async def cancel_call(call_id: str, request: Request, user=Depends(require_csrf)):
+    try:
+        data = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    missed = bool(data.get("missed"))
+    callee_id = None
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = call_row(c, call_id)
+        if not row or call_initiator(row) != user["id"]:
+            fail(404, "Call not found.")
+        if row["status"] != "ringing":
+            fail(409, "This call is no longer ringing.")
+        status = "missed" if missed else "cancelled"
+        finish_call(c, row, status, user["id"], "No answer" if missed else "Cancelled")
+        result = public_call(c, call_row(c, call_id))
+        callee_id = call_callee(row)
+        record_event(c, "call_missed" if missed else "call_cancelled", user["workspace_id"], user["id"], row["module_id"], {"call_id": call_id})
+    await hub.send(callee_id, {"type": "call.missed" if missed else "call.cancelled", "call": result})
+    return result
+
+
+@app.post("/api/calls/{call_id}/end")
+async def end_call(call_id: str, request: Request, user=Depends(require_csrf)):
+    data = await body_json(request)
+    failed = bool(data.get("failed"))
+    peer_id = None
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = call_row(c, call_id)
+        if not row or user["id"] not in (row["learner"], row["creator"]):
+            fail(404, "Call not found.")
+        if row["status"] != "active":
+            fail(409, "This call is no longer active.")
+        finish_call(c, row, "failed" if failed else "ended", user["id"], "Connection failed" if failed else None)
+        result = public_call(c, call_row(c, call_id))
+        peer_id = row["creator"] if user["id"] == row["learner"] else row["learner"]
+        record_event(c, "call_ended", user["workspace_id"], user["id"], row["module_id"], {"call_id": call_id, "failed": failed})
+    await hub.send(peer_id, {"type": "call.ended", "call": result})
+    return result
+
+
+@app.post("/api/calls/{call_id}/callback", status_code=201)
+async def call_back(call_id: str, user=Depends(require_csrf)):
+    learner_id = None
+    with connection() as c:
+        c.execute("BEGIN IMMEDIATE")
+        original = call_row(c, call_id)
+        if not original or original["creator"] != user["id"] or user["workspace_role"] != "creator":
+            fail(404, "Call not found.")
+        module = module_row(c, original["module_id"])
+        if not module or module["owner"] != user["id"]:
+            fail(404, "Module not found.")
+        if not c.execute(
+            "SELECT 1 FROM assignments WHERE module_id=? AND learner=?",
+            (original["module_id"], original["learner"]),
+        ).fetchone():
+            fail(409, "This learner is no longer assigned to the module.")
+        reconcile_calls(c)
+        if busy_with_call(c, original["learner"]) or busy_with_call(c, original["creator"]):
+            fail(409, "A call is already in progress. Try again when it ends.")
+        now = int(time.time())
+        online = hub.online(original["learner"])
+        status = "ringing" if online else "missed"
+        new_id = uuid.uuid4().hex
+        c.execute(
+            "INSERT INTO calls(id,workspace_id,module_id,learner,creator,initiated_by,status,created_at,updated_at,ended_at,failure_reason) "
+            "VALUES(?,?,?,?,?,'creator',?,?,?,?,?)",
+            (new_id, user["workspace_id"], original["module_id"], original["learner"], user["id"], status, now, now, None if online else now, None if online else "Learner offline"),
+        )
+        result = public_call(c, call_row(c, new_id))
+        learner_id = original["learner"]
+        record_event(c, "call_callback_started", user["workspace_id"], user["id"], original["module_id"], {"call_id": new_id, "learner_online": online})
+    if result["status"] == "ringing":
+        await hub.send(learner_id, {"type": "call.incoming", "call": result})
+    return result
 
 
 @app.post("/api/modules/{mid}/upload")
@@ -1037,6 +1352,102 @@ async def answer(aid: str, request: Request, user=Depends(require_csrf)):
         }
 
 
+def websocket_origin_ok(socket):
+    origin = socket.headers.get("origin")
+    if not origin:
+        return True
+    return urlsplit(origin).netloc == socket.headers.get("host", "")
+
+
+async def cleanup_user_calls(user):
+    """Close calls owned by a user whose last browser connection went away."""
+    notifications = []
+    with connection() as c:
+        rows = c.execute(
+            CALL_QUERY + " WHERE (calls.learner=? OR calls.creator=?) AND calls.status IN ('ringing','active')",
+            (user["id"], user["id"]),
+        ).fetchall()
+        for row in rows:
+            if row["status"] == "active":
+                status, event = "ended", "call.ended"
+            elif user["id"] == call_initiator(row):
+                status, event = "cancelled", "call.cancelled"
+            else:
+                status, event = "missed", "call.missed"
+            finish_call(c, row, status, user["id"], "Disconnected")
+            payload = public_call(c, call_row(c, row["id"]))
+            peer = row["creator"] if user["id"] == row["learner"] else row["learner"]
+            notifications.append((peer, event, payload))
+            record_event(c, "call_disconnected", user["workspace_id"], user["id"], row["module_id"], {"call_id": row["id"], "status": status})
+    for peer, event, payload in notifications:
+        await hub.send(peer, {"type": event, "call": payload})
+
+
+@app.websocket("/ws/calls")
+async def calls_socket(socket: WebSocket):
+    if not websocket_origin_ok(socket):
+        await socket.close(code=1008)
+        return
+    user = user_for_session(socket.cookies.get("trainly"))
+    if not user:
+        await socket.close(code=1008)
+        return
+    await socket.accept()
+    hub.add(user["id"], socket)
+    window_start, messages = time.time(), 0
+    try:
+        while True:
+            raw = await socket.receive_text()
+            if user["expires"] < time.time():
+                await socket.close(code=1008)
+                break
+            if len(raw) > 300_000:
+                await socket.close(code=1009)
+                break
+            now = time.time()
+            if now - window_start > 10:
+                window_start, messages = now, 0
+            messages += 1
+            if messages > 300:
+                await socket.close(code=1008)
+                break
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            kind = data.get("type")
+            if kind == "ping":
+                if not user_for_session(user["token"]):
+                    await socket.close(code=1008)
+                    break
+                await socket.send_json({"type": "pong"})
+                continue
+            if kind not in ("rtc.offer", "rtc.answer", "rtc.ice"):
+                continue
+            call_id = data.get("call_id")
+            if not isinstance(call_id, str) or not call_id or len(call_id) > 64:
+                continue
+            with connection() as c:
+                row = call_row(c, call_id)
+                if not row or row["status"] != "active" or user["id"] not in (row["learner"], row["creator"]):
+                    continue
+                peer_id = row["creator"] if user["id"] == row["learner"] else row["learner"]
+            payload = data.get("payload")
+            if not isinstance(payload, (dict, str)):
+                continue
+            await hub.send(peer_id, {"type": kind, "call_id": call_id, "payload": payload}, exclude=socket)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Call signaling failed for user %s", user["id"])
+    finally:
+        hub.remove(user["id"], socket)
+        if not hub.online(user["id"]):
+            await cleanup_user_calls(user)
+
+
 if __name__ == "__main__":
     from threading import Thread
 
@@ -1045,4 +1456,11 @@ if __name__ == "__main__":
 
     Thread(target=run_media_worker, name="trainly-media-worker", daemon=True).start()
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host="127.0.0.1", port=port, timeout_graceful_shutdown=2)
+    uvicorn.run(
+        app,
+        host=os.environ.get("TRAINLY_HOST", "127.0.0.1"),
+        port=port,
+        ssl_certfile=os.environ.get("TRAINLY_SSL_CERTFILE") or None,
+        ssl_keyfile=os.environ.get("TRAINLY_SSL_KEYFILE") or None,
+        timeout_graceful_shutdown=2,
+    )

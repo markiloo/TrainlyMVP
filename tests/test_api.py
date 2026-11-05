@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 
@@ -615,3 +616,174 @@ def test_delete_module_removes_media_and_generated_draft(setup_app, monkeypatch)
     assert client.get(f"/api/modules/{mid}").status_code == 404
     with api.connection() as c:
         assert c.execute("SELECT 1 FROM generated_drafts WHERE module_id=?", (mid,)).fetchone() is None
+        assert c.execute("SELECT 1 FROM calls WHERE module_id=?", (mid,)).fetchone() is None
+
+
+def test_calls_require_assignment_and_record_offline_creator(setup_app):
+    api, client = setup_app
+    learner = sign_in(client, "learner@trainly.local")
+    created = client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=learner)
+    assert created.status_code == 201
+    call = created.json()
+    assert call["status"] == "missed"
+    assert call["creator_online"] is False
+    assert call["learner"]["email"] == "learner@trainly.local"
+
+    history = client.get("/api/calls").json()
+    assert [row["id"] for row in history] == [call["id"]]
+    assert history[0]["status"] == "missed"
+    assert client.get("/api/config").json()["ice_servers"][0]["urls"]
+
+    with api.connection() as c:
+        other_id = c.execute(
+            "INSERT INTO users(email,name,password,role) VALUES(?,?,?,?)",
+            ("unassigned@example.com", "Unassigned Learner", api.password_hash("trainly"), "learner"),
+        ).lastrowid
+        c.execute("INSERT INTO memberships(workspace_id,user_id,role) VALUES(?,?,?)", ("local", other_id, "learner"))
+
+    unassigned = sign_in(client, "unassigned@example.com")
+    assert client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=unassigned).status_code == 404
+
+    creator = sign_in(client, "creator@trainly.local")
+    assert client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=creator).status_code == 404
+    creator_inbox = client.get("/api/calls").json()
+    assert [row["id"] for row in creator_inbox] == [call["id"]]
+    assert client.post(f"/api/calls/{call['id']}/accept", headers=creator).status_code == 409
+
+    admin = sign_in(client, "admin@trainly.local")
+    assert client.get("/api/calls").status_code == 403
+
+
+def test_creator_accepts_call_relays_signaling_and_ends_it(setup_app):
+    _, client = setup_app
+    creator = sign_in(client, "creator@trainly.local")
+    creator_token = client.cookies.get("trainly")
+    with client.websocket_connect("/ws/calls") as creator_ws:
+        learner = sign_in(client, "learner@trainly.local")
+        with client.websocket_connect("/ws/calls") as learner_ws:
+            call = client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=learner).json()
+            assert call["status"] == "ringing"
+            assert call["creator_online"] is True
+            assert call["learner_online"] is True
+            incoming = creator_ws.receive_json()
+            assert incoming["type"] == "call.incoming"
+            assert incoming["call"]["id"] == call["id"]
+
+            client.cookies.set("trainly", creator_token)
+            accepted = client.post(f"/api/calls/{call['id']}/accept", headers=creator)
+            assert accepted.status_code == 200
+            assert accepted.json()["status"] == "active"
+            assert learner_ws.receive_json()["type"] == "call.accepted"
+            assert creator_ws.receive_json()["type"] == "call.handled"
+
+            learner_ws.send_json({"type": "rtc.offer", "call_id": call["id"], "payload": {"type": "offer", "sdp": "v=0"}})
+            relayed = creator_ws.receive_json()
+            assert relayed == {"type": "rtc.offer", "call_id": call["id"], "payload": {"type": "offer", "sdp": "v=0"}}
+
+            ended = client.post(f"/api/calls/{call['id']}/end", json={}, headers=creator)
+            assert ended.status_code == 200
+            assert ended.json()["status"] == "ended"
+            assert ended.json()["duration"] >= 0
+            assert learner_ws.receive_json()["type"] == "call.ended"
+
+
+def test_creator_declines_then_calls_back_and_learner_accepts(setup_app):
+    _, client = setup_app
+    learner = sign_in(client, "learner@trainly.local")
+    learner_token = client.cookies.get("trainly")
+    missed = client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=learner).json()
+    assert missed["status"] == "missed"
+
+    creator = sign_in(client, "creator@trainly.local")
+    creator_token = client.cookies.get("trainly")
+    with client.websocket_connect("/ws/calls") as creator_ws:
+        client.cookies.set("trainly", learner_token)
+        with client.websocket_connect("/ws/calls") as learner_ws:
+            client.cookies.set("trainly", creator_token)
+            callback = client.post(f"/api/calls/{missed['id']}/callback", headers=creator)
+            assert callback.status_code == 201
+            callback_call = callback.json()
+            assert callback_call["status"] == "ringing"
+            assert callback_call["initiated_by"] == "creator"
+            assert learner_ws.receive_json()["type"] == "call.incoming"
+
+            client.cookies.set("trainly", learner_token)
+            accepted = client.post(f"/api/calls/{callback_call['id']}/accept", headers=learner)
+            assert accepted.status_code == 200
+            assert accepted.json()["status"] == "active"
+            assert creator_ws.receive_json()["type"] == "call.accepted"
+
+            ended = client.post(f"/api/calls/{callback_call['id']}/end", json={}, headers=learner)
+            assert ended.status_code == 200
+            assert creator_ws.receive_json()["type"] == "call.ended"
+
+
+def test_call_socket_requires_a_valid_session(setup_app):
+    _, client = setup_app
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect("/ws/calls") as socket:
+            socket.receive_text()
+    assert closed.value.code == 1008
+
+
+def test_participant_disconnect_ends_an_active_call_and_notifies_the_peer(setup_app):
+    api, client = setup_app
+    creator = sign_in(client, "creator@trainly.local")
+    creator_token = client.cookies.get("trainly")
+    with client.websocket_connect("/ws/calls") as creator_ws:
+        learner = sign_in(client, "learner@trainly.local")
+        with client.websocket_connect("/ws/calls") as learner_ws:
+            call = client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=learner).json()
+            assert creator_ws.receive_json()["type"] == "call.incoming"
+            client.cookies.set("trainly", creator_token)
+            assert client.post(f"/api/calls/{call['id']}/accept", headers=creator).status_code == 200
+            assert learner_ws.receive_json()["type"] == "call.accepted"
+            assert creator_ws.receive_json()["type"] == "call.handled"
+        ended = creator_ws.receive_json()
+        assert ended["type"] == "call.ended"
+        assert ended["call"]["status"] == "ended"
+    with api.connection() as c:
+        assert c.execute("SELECT status FROM calls WHERE id=?", (call["id"],)).fetchone()[0] == "ended"
+
+
+def test_ring_timeout_marks_the_call_missed_and_notifies_the_creator(setup_app):
+    _, client = setup_app
+    creator = sign_in(client, "creator@trainly.local")
+    creator_token = client.cookies.get("trainly")
+    with client.websocket_connect("/ws/calls") as creator_ws:
+        learner = sign_in(client, "learner@trainly.local")
+        call = client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=learner).json()
+        assert creator_ws.receive_json()["type"] == "call.incoming"
+        missed = client.post(f"/api/calls/{call['id']}/cancel", json={"missed": True}, headers=learner)
+        assert missed.status_code == 200
+        assert missed.json()["status"] == "missed"
+        assert creator_ws.receive_json()["type"] == "call.missed"
+        client.cookies.set("trainly", creator_token)
+        inbox = client.get("/api/calls").json()
+        assert inbox[0]["status"] == "missed"
+
+
+def test_call_decline_and_cancel_are_scoped_to_the_callee_or_initiator(setup_app):
+    _, client = setup_app
+    creator = sign_in(client, "creator@trainly.local")
+    creator_token = client.cookies.get("trainly")
+    with client.websocket_connect("/ws/calls") as creator_ws:
+        learner = sign_in(client, "learner@trainly.local")
+        learner_token = client.cookies.get("trainly")
+        with client.websocket_connect("/ws/calls") as learner_ws:
+            call = client.post("/api/calls", json={"module_id": "ltspice-models-demo"}, headers=learner).json()
+            assert creator_ws.receive_json()["type"] == "call.incoming"
+
+            client.cookies.set("trainly", creator_token)
+            assert client.post(f"/api/calls/{call['id']}/cancel", headers=creator).status_code == 404
+            assert client.post(f"/api/calls/{call['id']}/decline", headers=creator).status_code == 200
+            assert learner_ws.receive_json()["type"] == "call.declined"
+            assert creator_ws.receive_json()["type"] == "call.handled"
+
+            client.cookies.set("trainly", creator_token)
+            second = client.post(f"/api/calls/{call['id']}/callback", headers=creator).json()
+            assert learner_ws.receive_json()["type"] == "call.incoming"
+            client.cookies.set("trainly", learner_token)
+            assert client.post(f"/api/calls/{second['id']}/cancel", headers=learner).status_code == 404
+            assert client.post(f"/api/calls/{second['id']}/decline", headers=learner).status_code == 200
+            assert creator_ws.receive_json()["type"] == "call.declined"

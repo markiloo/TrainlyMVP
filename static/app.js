@@ -1,5 +1,5 @@
 const app=document.querySelector('#app'),toastEl=document.querySelector('#toast');
-const S={user:null,csrf:'',modules:[],module:null,view:'home',attempt:null,progress:null,asked:new Set(),config:{max_video_bytes:1024**3,max_video_seconds:7200,ai_enabled:false,default_pass_score:70},uploadState:null,localPreview:null,draft:null,selectedQuestion:null,editorSeek:null,admin:null};
+const S={user:null,csrf:'',modules:[],module:null,view:'home',attempt:null,progress:null,asked:new Set(),config:{max_video_bytes:1024**3,max_video_seconds:7200,ai_enabled:false,default_pass_score:70,ice_servers:[]},uploadState:null,localPreview:null,draft:null,selectedQuestion:null,editorSeek:null,admin:null,calls:[],call:null,incomingCall:null,incomingDialog:null,callSocket:null,callSocketStopped:false,callRetry:null,callPing:null,signalQueue:[],pendingIce:[]};
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(s){toastEl.textContent=s;toastEl.classList.add('show');setTimeout(()=>toastEl.classList.remove('show'),2700)}
 async function api(path,method='GET',data){const opts={method,headers:{}};if(data instanceof FormData)opts.body=data;else if(data!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(data)}if(method!=='GET'&&method!=='HEAD')opts.headers['X-CSRF-Token']=S.csrf;const r=await fetch(path,opts);let j={};try{j=await r.json()}catch{}if(!r.ok)throw Error(j.error||'Something went wrong.');return j}
@@ -139,9 +139,9 @@ function createAccountModal(){
 }
 
 async function loadModules(){S.modules=await api('/api/modules')}
-async function home(){S.view='home';if(S.user.role==='admin'){if(location.pathname!=='/admin')history.replaceState({},'','/admin');return adminHome()}try{await loadModules()}catch(e){return login()}if(S.user.role==='learner')return learnerHome();creatorHome()}
+async function home(){S.view='home';S.callSocketStopped=false;connectCallSocket();if(S.user.role==='admin'){if(location.pathname!=='/admin')history.replaceState({},'','/admin');return adminHome()}try{await loadModules()}catch(e){return login()}if(S.user.role==='learner')return learnerHome();creatorHome()}
 function learnerHome(){const cards=S.modules.filter(m=>m.status==='published');shell(`<section class="hero"><span class="eyebrow" style="color:var(--gold)">YOUR LEARNING SPACE</span><h1>Keep building your<br>confidence, ${esc(S.user.name.split(' ')[0])}.</h1><p>Pick up a new skill or continue where you left off. Every lesson is a step forward.</p></section><div class="row section-head"><div><h2>Your learning</h2><p>${cards.length} ${cards.length===1?'module':'modules'} ready when you are</p></div></div><section class="cards">${cards.map(m=>`<article class="card"><div class="card-art"><span class="badge">${m.completed?'COMPLETED':'READY TO LEARN'}</span></div><div class="card-body"><h3>${esc(m.title)}</h3><p>${esc(m.description||'A focused training module to help you learn by doing.')}</p><div class="card-meta"><span>${m.lessons.length} lessons · ${m.questions.length} check-ins</span><button class="button small" data-learn="${esc(m.id)}">${m.completed?'Review':'Start learning'} →</button></div></div></article>`).join('')||'<div class="empty">Your creator has not shared a module with you yet.</div>'}</section>`);app.querySelectorAll('[data-learn]').forEach(b=>b.onclick=()=>openLearner(b.dataset.learn))}
-function creatorHome(){const draft=S.modules.filter(m=>m.status==='draft'),published=S.modules.filter(m=>m.status==='published');shell(`<section class="hero"><span class="eyebrow" style="color:var(--gold)">CREATOR WORKSPACE</span><h1>Make every video<br>a learning moment.</h1><p>Create focused training modules, guide your learners with timely check-ins, and see their progress as they go.</p><button class="button" id="create">＋ Create a module</button></section><div class="workspace" style="margin-top:34px"><aside class="side-nav"><h3>Workspace</h3><button class="side-link active" data-section="modules">▦ &nbsp;My modules</button><button class="side-link" data-section="results">◷ &nbsp;Learner results</button></aside><section class="main-content" id="main-content"></section></div>`);document.querySelector('#create').onclick=createModule;document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>{document.querySelectorAll('.side-link').forEach(x=>x.classList.remove('active'));b.classList.add('active');b.dataset.section==='modules'?renderModules():renderAllResults()});renderModules()}
+function creatorHome(){const draft=S.modules.filter(m=>m.status==='draft'),published=S.modules.filter(m=>m.status==='published');shell(`<section class="hero"><span class="eyebrow" style="color:var(--gold)">CREATOR WORKSPACE</span><h1>Make every video<br>a learning moment.</h1><p>Create focused training modules, guide your learners with timely check-ins, and see their progress as they go.</p><button class="button" id="create">＋ Create a module</button></section><div class="workspace" style="margin-top:34px"><aside class="side-nav"><h3>Workspace</h3><button class="side-link active" data-section="modules">▦ &nbsp;My modules</button><button class="side-link" data-section="results">◷ &nbsp;Learner results</button><button class="side-link" data-section="calls">Calls</button></aside><section class="main-content" id="main-content"></section></div>`);document.querySelector('#create').onclick=createModule;document.querySelectorAll('[data-section]').forEach(b=>b.onclick=()=>{document.querySelectorAll('.side-link').forEach(x=>x.classList.remove('active'));b.classList.add('active');b.dataset.section==='modules'?renderModules():b.dataset.section==='calls'?renderCalls():renderAllResults()});renderModules()}
 function renderModules(){const el=document.querySelector('#main-content');if(!el)return;el.innerHTML=`<div class="titlebar"><h1>My modules</h1><p>Build, publish, and manage your team's training.</p></div><div style="margin-top:22px" class="module-list">${S.modules.map(m=>`<article class="module-row"><div><span class="pill ${m.status}">${m.status}</span><h3 style="margin-top:7px">${esc(m.title)}</h3><p>${esc(m.description||'No description yet')} · ${m.lessons.length} lessons · ${m.questions.length} questions</p></div><div style="display:flex;gap:8px">${m.status==='published'?`<button class="button secondary small" data-assign="${m.id}">Assign</button>`:''}<button class="button secondary small" data-results="${m.id}">Results</button><button class="button small" data-edit="${m.id}">${m.status==='published'?'Edit module':'Continue editing'} →</button></div></article>`).join('')||'<div class="empty">Create your first module to get started.</div>'}</div>`;el.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>editModule(b.dataset.edit));el.querySelectorAll('[data-results]').forEach(b=>b.onclick=()=>results(b.dataset.results));el.querySelectorAll('[data-assign]').forEach(b=>b.onclick=()=>assignLearner(b.dataset.assign))}
 function appModal(title,body,onSubmit){const previous=document.activeElement,dialog=document.createElement('dialog');dialog.className='app-modal';dialog.setAttribute('aria-labelledby','app-modal-heading');dialog.innerHTML=`<form method="dialog"><h2 id="app-modal-heading">${esc(title)}</h2>${body}<p class="modal-error" role="alert" hidden></p><div class="modal-actions"><button type="button" class="button secondary" data-cancel>Cancel</button><button class="button" data-submit>Continue</button></div></form>`;document.body.append(dialog);let closing=false;const close=()=>{if(closing)return;closing=true;if(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches){dialog.close();return}dialog.classList.add('closing');setTimeout(()=>dialog.close(),210)};dialog.querySelector('[data-cancel]').onclick=close;dialog.addEventListener('cancel',e=>{e.preventDefault();close()});dialog.addEventListener('close',()=>{dialog.remove();if(!dialog.dataset.skipFocus)previous?.focus()},{once:true});dialog.querySelector('form').onsubmit=async e=>{e.preventDefault();const button=dialog.querySelector('[data-submit]'),error=dialog.querySelector('.modal-error');button.disabled=true;error.hidden=true;try{await onSubmit(dialog,close)}catch(ex){error.textContent=ex.message;error.hidden=false}finally{button.disabled=false}};dialog.showModal();dialog.querySelector('input,select,textarea,button')?.focus();return dialog}
 function addDeleteButtons(){document.querySelectorAll('#main-content [data-edit]').forEach(edit=>{const button=document.createElement('button');button.className='button secondary small';button.textContent='Delete';button.onclick=()=>{const id=edit.dataset.edit,module=S.modules.find(m=>m.id===id);const dialog=appModal('Delete module',`<p>Delete “${esc(module?.title||'this module')}” and all its learner progress? This cannot be undone.</p>`,async(_,close)=>{await api('/api/modules/'+encodeURIComponent(id),'DELETE');close();S.modules=S.modules.filter(m=>m.id!==id);renderModules();toast('Module deleted.')});dialog.querySelector('[data-submit]').textContent='Delete module'};edit.parentElement.append(button)})}
@@ -383,7 +383,7 @@ async function renderAllResults(){const mods=S.modules.filter(m=>m.status==='pub
 async function openLearner(id){try{S.module=await api('/api/modules/'+id);S.view='learn';S.attempt=await api('/api/attempts','POST',{module_id:id});S.progress={position:S.attempt.position||0,completed:new Set(S.attempt.completed_lessons||[]),lastSaved:0};S.asked=new Set(S.attempt.answered_questions||[]);S.activeQuestion=null;renderLearner()}catch(e){toast(e.message)}}
 function videoTime(seconds){const total=Math.floor(Number(seconds)||0);return `${Math.floor(total/60)}:${String(total%60).padStart(2,'0')}`}
 function captionTrack(m,version){if(!m?.transcript?.length)return '';return `<track kind="captions" srclang="en" label="English" default src="/media/${encodeURIComponent(m.id)}/captions.vtt${version?`?version=${encodeURIComponent(version)}`:''}">`}
-function renderLearner(){const m=S.module;const idx=Math.max(0,m.lessons.findIndex(x=>S.progress.position>=x.start&&S.progress.position<x.end));const initial=m.lessons[idx];shell(`<div class="editor-head"><div class="titlebar"><span class="eyebrow">YOUR TRAINING</span><h1>${esc(m.title)}</h1><p>${esc(m.description)}</p><p class="hint">Passing score: ${esc(m.pass_score??70)}%${S.attempt?.passed?' · Passed':''}</p></div><div class="actions"><button class="button secondary small" id="reset-progress">Reset progress</button> <button class="button secondary small" id="back">&larr; My learning</button></div></div><div class="student-layout"><section><div class="video-box" id="video-box">${m.video?`<video id="player" controls playsinline src="/media/${encodeURIComponent(m.id)}?version=${encodeURIComponent(m.version||0)}">${captionTrack(m,m.version)}</video>`:`<div class="video-placeholder"><div class="play-icon">&#9654;</div><strong>Lesson video</strong><p>The creator has not added a video yet.<br>You can still work through the lessons and questions below.</p></div>`}</div><div id="quiz-area" aria-live="polite" aria-atomic="true"></div><section class="panel" style="margin-top:17px"><h2 id="lesson-title">${esc(initial?.title||'Welcome')}</h2><p id="lesson-summary">${esc(initial?.summary||'Choose a lesson to begin.')}</p><div class="progress"><i id="lesson-progress" style="width:${Math.round(S.progress.completed.size/Math.max(m.lessons.length,1)*100)}%"></i></div><p class="hint" id="resume-note">${S.progress.position>0?'Your progress is saved. Resume from where you left off.':''}</p></section></section><aside><section class="panel"><h2>Course outline</h2><p>${m.lessons.length} short lessons</p><div class="lesson-list">${m.lessons.map((x,i)=>`<button class="lesson-button" data-jump="${i}"><span class="lesson-number">${S.progress.completed.has(x.id)?'&#10003;':i+1}</span><span><strong style="font-size:12px">${esc(x.title)}</strong><small>${m.questions.filter(q=>q.at>=x.start&&q.at<=x.end).map(q=>'Question at '+videoTime(q.at)).join(' · ')||'Starts at '+videoTime(x.start)}</small></span></button>`).join('')}</div></section></aside></div>`);document.querySelector('#back').onclick=home;document.querySelector('#reset-progress').onclick=resetLearnerProgress;document.querySelectorAll('[data-jump]').forEach(b=>b.onclick=()=>jumpLesson(+b.dataset.jump));const v=document.querySelector('#player');if(v){v.addEventListener('loadedmetadata',()=>{if(S.progress.position>0&&S.progress.position<v.duration)v.currentTime=S.progress.position});v.addEventListener('timeupdate',()=>{checkQuestions(v.currentTime);trackPlayback(v.currentTime)});v.addEventListener('ended',()=>{trackPlayback(v.duration,true);checkQuestions(Infinity)});v.addEventListener('pause',()=>{S.progress.lastSaved=0;trackPlayback(v.currentTime)});v.addEventListener('play',()=>{if(S.activeQuestion)v.pause()});v.addEventListener('seeking',()=>{const q=S.activeQuestion?S.module.questions.find(x=>x.id===S.activeQuestion):S.module.questions.filter(x=>!S.asked.has(x.id)&&x.at<v.currentTime).sort((a,b)=>a.at-b.at)[0];if(q){v.pause();v.currentTime=q.at;showQuestion(q)}});v.addEventListener('seeked',()=>{const q=S.activeQuestion?S.module.questions.find(x=>x.id===S.activeQuestion):S.module.questions.filter(x=>!S.asked.has(x.id)&&x.at<=v.currentTime).sort((a,b)=>a.at-b.at)[0];if(q){v.pause();if(Math.abs(v.currentTime-q.at)>.1)v.currentTime=q.at;showQuestion(q)}trackPlayback(v.currentTime);checkQuestions(v.currentTime)})}}
+function renderLearner(){const m=S.module;const idx=Math.max(0,m.lessons.findIndex(x=>S.progress.position>=x.start&&S.progress.position<x.end));const initial=m.lessons[idx];shell(`<div class="editor-head"><div class="titlebar"><span class="eyebrow">YOUR TRAINING</span><h1>${esc(m.title)}</h1><p>${esc(m.description)}</p><p class="hint">Passing score: ${esc(m.pass_score??70)}%${S.attempt?.passed?' · Passed':''}</p></div><div class="actions"><button class="button secondary small" id="call-creator">Call creator</button> <button class="button secondary small" id="reset-progress">Reset progress</button> <button class="button secondary small" id="back">&larr; My learning</button></div></div><div class="student-layout"><section><div class="video-box" id="video-box">${m.video?`<video id="player" controls playsinline src="/media/${encodeURIComponent(m.id)}?version=${encodeURIComponent(m.version||0)}">${captionTrack(m,m.version)}</video>`:`<div class="video-placeholder"><div class="play-icon">&#9654;</div><strong>Lesson video</strong><p>The creator has not added a video yet.<br>You can still work through the lessons and questions below.</p></div>`}</div><div id="quiz-area" aria-live="polite" aria-atomic="true"></div><section class="panel" style="margin-top:17px"><h2 id="lesson-title">${esc(initial?.title||'Welcome')}</h2><p id="lesson-summary">${esc(initial?.summary||'Choose a lesson to begin.')}</p><div class="progress"><i id="lesson-progress" style="width:${Math.round(S.progress.completed.size/Math.max(m.lessons.length,1)*100)}%"></i></div><p class="hint" id="resume-note">${S.progress.position>0?'Your progress is saved. Resume from where you left off.':''}</p></section></section><aside><section class="panel"><h2>Course outline</h2><p>${m.lessons.length} short lessons</p><div class="lesson-list">${m.lessons.map((x,i)=>`<button class="lesson-button" data-jump="${i}"><span class="lesson-number">${S.progress.completed.has(x.id)?'&#10003;':i+1}</span><span><strong style="font-size:12px">${esc(x.title)}</strong><small>${m.questions.filter(q=>q.at>=x.start&&q.at<=x.end).map(q=>'Question at '+videoTime(q.at)).join(' · ')||'Starts at '+videoTime(x.start)}</small></span></button>`).join('')}</div></section><section class="panel"><h2>Call history</h2><div id="learner-call-history"><p class="hint">Loading…</p></div></section></aside></div>`);document.querySelector('#back').onclick=home;document.querySelector('#reset-progress').onclick=resetLearnerProgress;document.querySelector('#call-creator').onclick=()=>callModuleCreator(m.id);document.querySelectorAll('[data-jump]').forEach(b=>b.onclick=()=>jumpLesson(+b.dataset.jump));const v=document.querySelector('#player');if(v){v.addEventListener('loadedmetadata',()=>{if(S.progress.position>0&&S.progress.position<v.duration)v.currentTime=S.progress.position});v.addEventListener('timeupdate',()=>{checkQuestions(v.currentTime);trackPlayback(v.currentTime)});v.addEventListener('ended',()=>{trackPlayback(v.duration,true);checkQuestions(Infinity)});v.addEventListener('pause',()=>{S.progress.lastSaved=0;trackPlayback(v.currentTime)});v.addEventListener('play',()=>{if(S.activeQuestion)v.pause()});v.addEventListener('seeking',()=>{const q=S.activeQuestion?S.module.questions.find(x=>x.id===S.activeQuestion):S.module.questions.filter(x=>!S.asked.has(x.id)&&x.at<v.currentTime).sort((a,b)=>a.at-b.at)[0];if(q){v.pause();v.currentTime=q.at;showQuestion(q)}});v.addEventListener('seeked',()=>{const q=S.activeQuestion?S.module.questions.find(x=>x.id===S.activeQuestion):S.module.questions.filter(x=>!S.asked.has(x.id)&&x.at<=v.currentTime).sort((a,b)=>a.at-b.at)[0];if(q){v.pause();if(Math.abs(v.currentTime-q.at)>.1)v.currentTime=q.at;showQuestion(q)}trackPlayback(v.currentTime);checkQuestions(v.currentTime)})}loadLearnerCallHistory(m.id)}
 async function resetLearnerProgress(){const button=document.querySelector('#reset-progress');button.disabled=true;const video=document.querySelector('#player');if(video)video.pause();try{await S.progress.queue;await api('/api/modules/'+S.module.id+'/reset-progress','POST',{});S.attempt=await api('/api/attempts','POST',{module_id:S.module.id});S.progress={position:0,completed:new Set(),lastSaved:Date.now()};S.asked=new Set();S.activeQuestion=null;S.modules=await api('/api/modules');renderLearner();toast('Progress reset. Start the video from the beginning.')}catch(e){button.disabled=false;toast(e.message)}}
 function saveProgress(position,lessonId){const attemptId=S.attempt.id;const lessons=S.module.lessons;const send=async(attempt=0)=>{try{const result=await api('/api/attempts/'+attemptId+'/progress','POST',{position,lesson_id:lessonId});if(S.attempt.id!==attemptId)return;S.progress.position=result.position;S.progress.completed=new Set(result.completed_lessons);S.progress.pending=null;lessons.forEach((x,i)=>{const mark=document.querySelector(`[data-jump="${i}"] .lesson-number`);if(mark)mark.textContent=S.progress.completed.has(x.id)?String.fromCharCode(10003):String(i+1)});const bar=document.querySelector('#lesson-progress');if(bar)bar.style.width=Math.round(S.progress.completed.size/Math.max(S.module.lessons.length,1)*100)+'%';return result}catch(e){if(S.attempt.id===attemptId&&attempt<4){await delay(500*Math.pow(2,attempt));return send(attempt+1)}S.progress.pending={position,lessonId};throw e}};S.progress.queue=(S.progress.queue||Promise.resolve()).then(()=>send()).catch(()=>toast('Progress could not be saved. It will retry at the next checkpoint.'));return S.progress.queue}
 function lessonWatched(x){const v=document.querySelector('#player');if(!v)return false;for(let i=0;i<v.played.length;i++)if(v.played.start(i)<=x.start+1&&v.played.end(i)>=x.end-1)return true;return false}
@@ -391,7 +391,503 @@ function trackPlayback(position,ended=false){const now=Date.now();const lesson=S
 function jumpLesson(i){const x=S.module.lessons[i];document.querySelector('#lesson-title').textContent=x.title;document.querySelector('#lesson-summary').textContent=x.summary;const v=document.querySelector('#player');if(v){v.currentTime=x.start;v.play().catch(()=>{})}else{saveProgress(x.start,x.id);if(S.module.questions.length){const q=S.module.questions.find(q=>!S.asked.has(q.id));if(q)showQuestion(q)}}}
 function checkQuestions(t){if(S.activeQuestion)return;const q=S.module.questions.filter(q=>!S.asked.has(q.id)).sort((a,b)=>a.at-b.at)[0];if(q&&q.at<=t){const v=document.querySelector('#player');if(v)v.pause();showQuestion(q)}}
 function showQuestion(q){if(S.asked.has(q.id)||S.activeQuestion)return;S.activeQuestion=q.id;const el=document.querySelector('#quiz-area');el.innerHTML=`<section class="quiz-box" role="dialog" aria-modal="false" aria-labelledby="quiz-prompt" tabindex="-1"><span class="eyebrow">KNOWLEDGE CHECK</span><h2 id="quiz-prompt" style="font-size:18px;margin:5px 0 15px">${esc(q.prompt)}</h2><form id="answer-form"><fieldset style="border:0;padding:0;margin:0"><legend class="hint" style="margin-bottom:8px">Choose one answer</legend>${q.options.map((o,i)=>`<label class="quiz-option"><input required type="radio" name="choice" value="${i}"> &nbsp;${esc(o)}</label>`).join('')}</fieldset><button class="button small" style="margin-top:10px">Check answer</button></form></section>`;el.querySelector('input')?.focus();document.querySelector('#answer-form').onsubmit=async e=>{e.preventDefault();const choice=+new FormData(e.currentTarget).get('choice');try{const result=await api('/api/attempts/'+S.attempt.id,'POST',{question_id:q.id,choice});S.asked.add(q.id);S.activeQuestion=null;el.innerHTML=`<section class="quiz-box" role="status" aria-live="polite" tabindex="-1"><span class="pill ${result.correct?'published':'draft'}">${result.correct?'Correct':'Not quite'}</span><p style="margin:10px 0">${esc(result.explanation)}</p><strong>Current score: ${result.score}% · Passing: ${result.pass_score}%</strong><p style="margin-bottom:0">${result.completed?(result.passed?'You passed this module. Nice work!':`You completed every lesson and question, but the score is below the ${result.pass_score}% passing mark.`):'Continue with the next lesson when you’re ready.'}</p></section>`;el.querySelector('.quiz-box')?.focus();const v=document.querySelector('#player');if(v&&v.currentTime<v.duration){checkQuestions(v.currentTime);if(!S.activeQuestion)v.play().catch(()=>{})}}catch(e){toast(e.message)}}}
-async function logout(){const adminMode=location.pathname==='/admin';await api('/api/logout','POST',{}).catch(()=>{});S.user=null;S.csrf='';S.admin=null;login(adminMode)}
+async function logout(){const adminMode=location.pathname==='/admin';stopCallSocket();await api('/api/logout','POST',{}).catch(()=>{});S.user=null;S.csrf='';S.admin=null;login(adminMode)}
+const CALL_MEDIA={video:{width:{ideal:1280},height:{ideal:720},facingMode:'user'},audio:true};
+
+function connectCallSocket(){
+  if(!S.user||S.user.role==='admin'||S.callSocket||S.callSocketStopped)return;
+  let socket;
+  try{socket=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws/calls')}catch{return}
+  S.callSocket=socket;
+  socket.onopen=()=>{clearTimeout(S.callRetry);S.callRetry=null;S.callPing=setInterval(()=>{if(socket.readyState===1)socket.send(JSON.stringify({type:'ping'}))},25000)};
+  socket.onmessage=e=>{let message;try{message=JSON.parse(e.data)}catch{return}handleCallSocket(message).catch(()=>{})};
+  socket.onclose=()=>{
+    clearInterval(S.callPing);S.callPing=null;
+    if(S.callSocket===socket)S.callSocket=null;
+    if(S.callSocketStopped||!S.user)return;
+    if(S.call)abortCall('The call connection was lost.');
+    if(S.incomingCall)closeIncomingDialog();
+    S.callRetry=setTimeout(connectCallSocket,3000);
+  };
+}
+
+function stopCallSocket(){
+  S.callSocketStopped=true;
+  clearTimeout(S.callRetry);S.callRetry=null;
+  clearInterval(S.callPing);S.callPing=null;
+  if(S.callSocket){try{S.callSocket.close()}catch{}S.callSocket=null}
+  closeIncomingDialog();
+  closeCallOverlay();
+}
+
+async function handleCallSocket(message){
+  const type=message.type;
+  if(type==='pong')return;
+  if(type==='call.incoming'){
+    if(S.incomingCall||S.call){declineIncomingCall(message.call).catch(()=>{});return}
+    showIncomingCall(message.call);return;
+  }
+  if(type==='call.handled'){
+    if(S.incomingCall&&message.call?.id===S.incomingCall.id)closeIncomingDialog();
+    return;
+  }
+  if(type==='call.accepted'){
+    if(S.call&&S.call.call.id===message.call?.id){
+      S.call.call=message.call;S.call.status='active';clearCallTimer();updateCallStatus('Connected.');
+      if(S.call.role==='learner'&&!S.call.pc)setupLearnerPeer();
+    }else if(!S.call&&S.user.role==='creator'){
+      let stream=null;
+      try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch{toast('Microphone access was unavailable. You can still watch and annotate.')}
+      openCallOverlay(message.call,'creator',stream);
+      setupCreatorPeer(message.call,stream);
+      updateCallStatus('Connected.');
+    }
+    refreshInbox();return;
+  }
+  if(type==='call.declined'||type==='call.cancelled'||type==='call.missed'||type==='call.ended'||type==='call.failed'){
+    if(S.incomingCall&&message.call?.id===S.incomingCall.id)closeIncomingDialog();
+    if(S.call&&S.call.call.id===message.call?.id){
+      closeCallOverlay();
+      toast(type==='call.ended'?'Call ended.':type==='call.missed'?'No answer. The call was saved as missed.':type==='call.declined'?'The call was declined.':'The call was cancelled.');
+    }else if(type==='call.missed'&&message.call?.initiated_by==='creator'&&S.user.role==='learner'){
+      toast('You missed a call from the creator.');
+    }
+    refreshInbox();return;
+  }
+  if(type.startsWith('rtc.'))await handleSignal(message);
+}
+
+function refreshInbox(){
+  if(S.view==='calls'&&!S.call)renderCalls().catch(()=>{});
+  if(S.user?.role==='learner'&&S.module?.id)loadLearnerCallHistory(S.module.id);
+}
+
+function callStatusLabel(status){return {ringing:'Ringing',active:'In progress',ended:'Ended',declined:'Declined',cancelled:'Cancelled',missed:'Missed',failed:'Failed'}[status]||status}
+
+function callDuration(seconds){const total=Math.max(0,Math.round(Number(seconds)||0));return `${Math.floor(total/60)}:${String(total%60).padStart(2,'0')}`}
+
+async function renderCalls(){
+  S.view='calls';
+  let rows;
+  try{rows=await api('/api/calls')}catch(error){return toast(error.message)}
+  S.calls=rows;
+  const body=rows.length?`<table class="results-table" style="margin-top:20px"><thead><tr><th>Learner</th><th>Module</th><th>Direction</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead><tbody>${rows.map(row=>{
+    const actionable=!['ringing','active'].includes(row.status);
+    const action=actionable?(row.learner_online?`<button class="button secondary small" data-callback="${esc(row.id)}">Call back</button>`:'<span class="hint">Learner offline</span>'):'&mdash;';
+    return `<tr><td>${esc(row.learner.name)}<br><span class="hint">${esc(row.learner.email)}</span></td><td>${esc(row.module.title)}</td><td>${row.initiated_by==='learner'?'Incoming':'Callback'}</td><td><span class="pill call-${esc(row.status)}">${esc(callStatusLabel(row.status))}</span></td><td>${new Date(row.created_at*1000).toLocaleString()}</td><td>${row.duration==null?'&mdash;':callDuration(row.duration)}</td><td>${action}</td></tr>`;
+  }).join('')}</tbody></table>`:'<div class="empty" style="margin-top:20px">No calls yet. Learners can call you from a published module.</div>';
+  const content=`<div class="titlebar"><h1>Calls</h1><p>Incoming calls, missed attempts, and call history for your modules. Calls are not recorded.</p></div>${body}`;
+  const target=document.querySelector('#main-content');
+  if(target)target.innerHTML=content;else shell(content);
+  document.querySelector('#refresh-calls')?.remove();
+  const refresh=document.createElement('button');refresh.className='button secondary small';refresh.id='refresh-calls';refresh.textContent='Refresh';
+  refresh.onclick=()=>renderCalls();
+  (target?target.querySelector('.titlebar'):document.querySelector('.titlebar'))?.append(refresh);
+  document.querySelectorAll('[data-callback]').forEach(b=>b.onclick=()=>callBack(b.dataset.callback));
+}
+
+async function loadLearnerCallHistory(moduleId){
+  const target=document.querySelector('#learner-call-history');
+  if(!target)return;
+  try{
+    const rows=(await api('/api/calls')).filter(row=>row.module.id===moduleId).slice(0,5);
+    target.innerHTML=rows.length?rows.map(row=>`<div class="call-history-row"><span><strong>${esc(callStatusLabel(row.status))}</strong> &middot; ${new Date(row.created_at*1000).toLocaleString()}</span><span class="hint">${row.duration==null?'':callDuration(row.duration)} ${row.initiated_by==='creator'?'Creator called you':'You called the creator'}</span></div>`).join(''):'<p class="hint">No calls yet.</p>';
+  }catch{target.innerHTML='<p class="hint">Call history is unavailable.</p>'}
+}
+
+async function callModuleCreator(moduleId){
+  if(S.call)return toast('A call is already in progress.');
+  let stream;
+  try{stream=await navigator.mediaDevices.getUserMedia(CALL_MEDIA)}catch{return toast('Camera and microphone access is required to start a call.')}
+  try{
+    const call=await api('/api/calls','POST',{module_id:moduleId});
+    if(call.status!=='ringing'){stopStream(stream);toast('The creator is offline. Your call was saved to their inbox.');refreshInbox();return}
+    openCallOverlay(call,'learner',stream);
+    setCallRingingTimer(call.id,'learner');
+  }catch(error){stopStream(stream);toast(error.message)}
+}
+
+async function callBack(callId){
+  if(S.call)return toast('A call is already in progress.');
+  let stream=null;
+  try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch{toast('Microphone access was unavailable. You can still watch and annotate.')}
+  try{
+    const call=await api('/api/calls/'+encodeURIComponent(callId)+'/callback','POST',{});
+    if(call.status!=='ringing'){stopStream(stream);toast('The learner is offline. The callback was saved as missed.');refreshInbox();return}
+    openCallOverlay(call,'creator',stream);
+    setupCreatorPeer(call,stream);
+    setCallRingingTimer(call.id,'creator');
+  }catch(error){stopStream(stream);toast(error.message)}
+}
+
+function setCallRingingTimer(callId,role){
+  if(!S.call)return;
+  S.call.ringTimer=setTimeout(async()=>{
+    if(!S.call||S.call.call.id!==callId||S.call.status!=='ringing')return;
+    try{await api('/api/calls/'+encodeURIComponent(callId)+'/cancel','POST',{missed:true})}catch{}
+    closeCallOverlay();toast('No answer. The call was saved as missed.');refreshInbox();
+  },(Number(S.config.call_ring_seconds)||45)*1000);
+}
+
+function clearCallTimer(){if(S.call?.ringTimer){clearTimeout(S.call.ringTimer);S.call.ringTimer=null}}
+
+function showIncomingCall(call){
+  S.incomingCall=call;
+  let handled=false;
+  const who=S.user.role==='creator'?call.learner:call.creator;
+  const dialog=appModal(S.user.role==='creator'?'Incoming call':'Creator is calling',`<p><strong>${esc(who.name)}</strong> is calling about <strong>${esc(call.module.title)}</strong>.</p><p class="hint">${S.user.role==='creator'?'The learner shares their camera and microphone; you share your microphone. Calls are not recorded.':'Accepting shares your camera and microphone with the creator. Calls are not recorded.'}</p>`,async(_,close)=>{
+    const accepted=await acceptIncomingCall(call);
+    handled=true;S.incomingCall=null;S.incomingDialog=null;close();
+    if(!accepted)return;
+  });
+  S.incomingDialog=dialog;
+  dialog.querySelector('[data-submit]').textContent='Accept';
+  const decline=dialog.querySelector('[data-cancel]');
+  decline.textContent='Decline';
+  decline.onclick=async()=>{if(handled)return;handled=true;S.incomingCall=null;S.incomingDialog=null;dialog.close();await declineIncomingCall(call).catch(()=>{})};
+  dialog.addEventListener('cancel',()=>{if(handled)return;handled=true;S.incomingCall=null;S.incomingDialog=null;declineIncomingCall(call).catch(()=>{})});
+  dialog.addEventListener('close',()=>{if(S.incomingDialog===dialog)S.incomingDialog=null;if(S.incomingCall?.id===call.id)S.incomingCall=null;},{once:true});
+}
+
+async function acceptIncomingCall(call){
+  const role=S.user.role==='learner'?'learner':'creator';
+  let stream=null;
+  try{stream=await navigator.mediaDevices.getUserMedia(role==='learner'?CALL_MEDIA:{audio:true})}catch{
+    if(role==='learner'){
+      await api('/api/calls/'+encodeURIComponent(call.id)+'/decline','POST',{}).catch(()=>{});
+      toast('Camera and microphone access is required to take the call.');
+      return false;
+    }
+    toast('Microphone access was unavailable. You can still watch and annotate.');
+  }
+  const accepted=await api('/api/calls/'+encodeURIComponent(call.id)+'/accept','POST',{});
+  openCallOverlay(accepted,role,stream);
+  if(role==='creator')setupCreatorPeer(accepted,stream);
+  else setupLearnerPeer(accepted,stream);
+  return true;
+}
+
+async function declineIncomingCall(call){
+  try{await api('/api/calls/'+encodeURIComponent(call.id)+'/decline','POST',{});toast('Call declined.')}catch(error){toast(error.message)}
+  refreshInbox();
+}
+
+function closeIncomingDialog(){
+  S.incomingCall=null;
+  const dialog=S.incomingDialog;S.incomingDialog=null;
+  if(dialog){try{dialog.close()}catch{}}
+}
+
+function openCallOverlay(call,role,stream){
+  if(S.call&&S.call.call.id===call.id){S.call.call=call;S.call.status=call.status;return}
+  S.call={call,role,status:call.status,localStream:stream||null,remoteStream:null,pc:null,dc:null,strokes:[],penColor:'#e7c275',penWidth:3,activeStroke:null,pointBuffer:[],pointFrame:null,pendingIce:[],ringTimer:null,resizeHandler:null};
+  const isCreator=role==='creator';
+  const layer=document.createElement('div');layer.id='call-layer';layer.className='call-layer';
+  layer.innerHTML=`<section class="call-panel" role="dialog" aria-modal="true" aria-labelledby="call-heading"><header class="call-head"><div><span class="eyebrow">${isCreator?'LEARNER CALL':'CALL WITH CREATOR'}</span><h2 id="call-heading">${esc(call.module.title)}</h2><p id="call-status" role="status" aria-live="polite"></p></div><div class="call-head-actions"><button class="button secondary small" id="call-mute">Mute</button><button class="button secondary small" id="call-hangup">Hang up</button></div></header><div class="call-stage"><div class="call-video-wrap"><video id="call-video" autoplay playsinline ${isCreator?'':'muted'}></video><canvas id="call-annotation" aria-label="Live annotation drawing area"></canvas><p id="call-remote-note" class="hint">${isCreator?'Waiting for the learner to connect…':'Connecting to the creator…'}</p></div></div><audio id="call-audio" autoplay></audio>${isCreator?'<div class="call-tools"><span class="hint">Draw on the video</span><button type="button" class="pen-color active" data-pen-color="#e7c275" aria-label="Gold pen" style="--pen:#e7c275"></button><button type="button" class="pen-color" data-pen-color="#f25f5c" aria-label="Red pen" style="--pen:#f25f5c"></button><button type="button" class="pen-color" data-pen-color="#ffffff" aria-label="White pen" style="--pen:#fff"></button><label class="hint">Size <select id="pen-size"><option value="2">Thin</option><option value="3" selected>Medium</option><option value="6">Thick</option></select></label><button type="button" class="button secondary small" id="annot-undo" data-annotation-tool disabled>Undo</button><button type="button" class="button secondary small" id="annot-clear" data-annotation-tool disabled>Clear</button><span id="annot-status" class="hint">Annotations unavailable until the call connects.</span></div>':'<p class="hint">Your camera and microphone are shared with the creator. Live annotations appear over your video. Calls are not recorded.</p>'}</section>`;
+  document.body.append(layer);
+  updateCallStatus(call.status==='active'?'Connected. Waiting for media…':role==='creator'?'Calling learner…':'Ringing creator…');
+  const video=document.querySelector('#call-video');
+  if(video&&role==='learner'&&stream)video.srcObject=stream;
+  let muted=false;
+  document.querySelector('#call-mute').onclick=e=>{muted=!muted;(S.call?.localStream?.getAudioTracks()||[]).forEach(track=>track.enabled=!muted);e.currentTarget.textContent=muted?'Unmute':'Mute'};
+  document.querySelector('#call-hangup').onclick=()=>hangUpCall();
+  if(isCreator){
+    document.querySelectorAll('[data-pen-color]').forEach(b=>b.onclick=()=>{S.call.penColor=b.dataset.penColor;document.querySelectorAll('[data-pen-color]').forEach(x=>x.classList.toggle('active',x===b))});
+    document.querySelector('#pen-size').onchange=e=>{S.call.penWidth=Number(e.target.value)};
+    document.querySelector('#annot-undo').onclick=undoAnnotation;
+    document.querySelector('#annot-clear').onclick=clearAnnotation;
+  }
+  setupAnnotation();
+}
+
+function updateCallStatus(text){const el=document.querySelector('#call-status');if(el)el.textContent=text}
+
+function stopStream(stream){if(stream)stream.getTracks().forEach(track=>{try{track.stop()}catch{}})}
+
+function closeCallOverlay(){
+  const call=S.call;
+  if(call){
+    clearCallTimer();
+    if(call.pointFrame&&typeof cancelAnimationFrame==='function')cancelAnimationFrame(call.pointFrame);
+    if(call.resizeHandler)window.removeEventListener('resize',call.resizeHandler);
+    stopStream(call.localStream);
+    if(call.pc){try{call.pc.close()}catch{}}
+    if(call.dc){try{call.dc.close()}catch{}}
+  }
+  S.call=null;
+  S.signalQueue=[];
+  document.querySelector('#call-layer')?.remove();
+}
+
+function abortCall(message){closeCallOverlay();toast(message)}
+
+async function hangUpCall(){
+  const current=S.call;
+  if(!current)return;
+  const call=current.call;
+  clearCallTimer();
+  try{
+    if(current.status==='ringing'){
+      const initiator=(call.initiated_by==='learner'&&current.role==='learner')||(call.initiated_by==='creator'&&current.role==='creator');
+      await api('/api/calls/'+encodeURIComponent(call.id)+'/'+(initiator?'cancel':'decline'),'POST',{});
+    }else if(current.status==='active'){
+      await api('/api/calls/'+encodeURIComponent(call.id)+'/end','POST',{});
+    }
+  }catch(error){toast(error.message)}
+  closeCallOverlay();refreshInbox();
+}
+
+async function failActiveCall(message){
+  const call=S.call?.call;
+  if(call&&S.call.status==='active')await api('/api/calls/'+encodeURIComponent(call.id)+'/end','POST',{failed:true}).catch(()=>{});
+  closeCallOverlay();toast(message);refreshInbox();
+}
+
+function sendSignal(callId,type,payload){
+  if(S.callSocket&&S.callSocket.readyState===1){try{S.callSocket.send(JSON.stringify({type,call_id:callId,payload}))}catch{}}
+}
+
+async function handleSignal(message){
+  const current=S.call;
+  if(!current||!current.pc||current.call.id!==message.call_id){S.signalQueue.push(message);return}
+  if(message.type==='rtc.offer')await handleOffer(message);
+  else if(message.type==='rtc.answer')await handleAnswer(message);
+  else if(message.type==='rtc.ice')await handleIce(message);
+}
+
+async function drainSignals(callId){
+  const pending=S.signalQueue.filter(message=>message.call_id===callId);
+  S.signalQueue=S.signalQueue.filter(message=>message.call_id!==callId);
+  for(const message of pending)await handleSignal(message);
+}
+
+function newPeer(){
+  const pc=new RTCPeerConnection({iceServers:S.config.ice_servers||[]});
+  pc.onicecandidate=e=>{if(e.candidate&&S.call&&S.call.pc===pc)sendSignal(S.call.call.id,'rtc.ice',e.candidate.toJSON?e.candidate.toJSON():e.candidate)};
+  pc.ontrack=e=>{
+    let stream=e.streams[0];
+    if(!stream){
+      stream=S.call?.remoteStream||new MediaStream();
+      if(!stream.getTracks().some(track=>track.id===e.track.id))stream.addTrack(e.track);
+    }
+    attachRemoteStream(stream);
+  };
+  pc.onconnectionstatechange=()=>{
+    if(!S.call||S.call.pc!==pc)return;
+    if(pc.connectionState==='failed')failActiveCall('The call connection failed.');
+  };
+  return pc;
+}
+
+function setupLearnerPeer(){
+  const current=S.call;
+  if(!current||current.pc)return;
+  const pc=newPeer();
+  current.pc=pc;
+  (current.localStream?.getTracks()||[]).forEach(track=>pc.addTrack(track,current.localStream));
+  setupDataChannel(pc.createDataChannel('trainly-annotations',{ordered:true}));
+  pc.createOffer().then(offer=>pc.setLocalDescription(offer)).then(()=>{
+    const local=pc.localDescription;
+    if(local)sendSignal(current.call.id,'rtc.offer',{type:local.type,sdp:local.sdp});
+    drainSignals(current.call.id);
+  }).catch(()=>failActiveCall('Could not start the call media.'));
+}
+
+function setupCreatorPeer(call,stream){
+  const current=S.call;
+  if(!current||current.pc)return;
+  const pc=newPeer();
+  current.pc=pc;
+  pc.ondatachannel=e=>setupDataChannel(e.channel);
+  drainSignals(call.id);
+}
+
+async function handleOffer(message){
+  const current=S.call;
+  if(!current||!current.pc||current.pc.remoteDescription)return;
+  const pc=current.pc;
+  await pc.setRemoteDescription(message.payload);
+  await flushIce();
+  const track=current.localStream?.getAudioTracks?.()[0];
+  if(track){
+    const audio=pc.getTransceivers().find(transceiver=>transceiver.receiver.track?.kind==='audio'||transceiver.sender.track?.kind==='audio');
+    if(audio){await audio.sender.replaceTrack(track);try{audio.direction='sendrecv'}catch{}}
+    else pc.addTrack(track,current.localStream);
+  }
+  const answer=await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  if(pc.localDescription)sendSignal(current.call.id,'rtc.answer',{type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+  updateCallStatus('Connected.');
+}
+
+async function handleAnswer(message){
+  const current=S.call;
+  if(!current||!current.pc||current.pc.remoteDescription)return;
+  await current.pc.setRemoteDescription(message.payload);
+  await flushIce();
+  updateCallStatus('Connected.');
+}
+
+async function handleIce(message){
+  const current=S.call;
+  if(!current||!current.pc)return;
+  if(current.pc.remoteDescription)await current.pc.addIceCandidate(message.payload).catch(()=>{});
+  else current.pendingIce.push(message.payload);
+}
+
+async function flushIce(){
+  const current=S.call;
+  if(!current||!current.pc)return;
+  const pending=current.pendingIce.splice(0);
+  for(const candidate of pending)await current.pc.addIceCandidate(candidate).catch(()=>{});
+}
+
+function attachRemoteStream(stream){
+  if(!S.call||!stream)return;
+  S.call.remoteStream=stream;
+  const video=document.querySelector('#call-video'),audio=document.querySelector('#call-audio');
+  if(S.call.role==='creator'){
+    if(video){video.srcObject=stream;video.play().catch(()=>{})}
+  }else if(audio){audio.srcObject=stream;audio.play().catch(()=>{})}
+  document.querySelector('#call-remote-note')?.remove();
+  updateCallStatus('Connected.');
+}
+
+function setupDataChannel(channel){
+  if(!S.call)return;
+  S.call.dc=channel;
+  channel.onopen=()=>{const label=document.querySelector('#annot-status');if(label)label.textContent='Annotation ready.';document.querySelectorAll('[data-annotation-tool]').forEach(b=>b.disabled=false)};
+  channel.onclose=()=>{const label=document.querySelector('#annot-status');if(label)label.textContent='Annotations unavailable.';document.querySelectorAll('[data-annotation-tool]').forEach(b=>b.disabled=true)};
+  channel.onmessage=e=>{try{handleAnnotation(JSON.parse(e.data))}catch{}};
+}
+
+function sendAnnotation(message){
+  const dc=S.call?.dc;
+  if(!dc||dc.readyState!=='open'||dc.bufferedAmount>1000000)return;
+  try{dc.send(JSON.stringify(message))}catch{}
+}
+
+function videoContentRect(video,canvas){
+  const box=video.getBoundingClientRect(),canvasBox=canvas.getBoundingClientRect();
+  const videoWidth=video.videoWidth||16,videoHeight=video.videoHeight||9;
+  const scale=Math.min(box.width/videoWidth,box.height/videoHeight);
+  const width=videoWidth*scale,height=videoHeight*scale;
+  return {x:box.left-canvasBox.left+(box.width-width)/2,y:box.top-canvasBox.top+(box.height-height)/2,w:width,h:height};
+}
+
+function annotationPoint(event){
+  const current=S.call,video=document.querySelector('#call-video');
+  if(!current||!current.canvas||!video)return null;
+  const canvasBox=current.canvas.getBoundingClientRect();
+  const rect=videoContentRect(video,current.canvas);
+  const x=(event.clientX-canvasBox.left-rect.x)/rect.w;
+  const y=(event.clientY-canvasBox.top-rect.y)/rect.h;
+  if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||x>1||y<0||y>1)return null;
+  return [Math.round(x*10000)/10000,Math.round(y*10000)/10000];
+}
+
+function drawAnnotationStrokes(){
+  const current=S.call;
+  if(!current||!current.canvas||!current.canvasContext)return;
+  const canvas=current.canvas,context=current.canvasContext;
+  const ratio=window.devicePixelRatio||1,width=canvas.clientWidth,height=canvas.clientHeight;
+  const targetWidth=Math.max(1,Math.round(width*ratio)),targetHeight=Math.max(1,Math.round(height*ratio));
+  if(canvas.width!==targetWidth||canvas.height!==targetHeight){canvas.width=targetWidth;canvas.height=targetHeight}
+  context.setTransform(ratio,0,0,ratio,0,0);
+  context.clearRect(0,0,width,height);
+  const video=document.querySelector('#call-video');
+  if(!video)return;
+  const rect=videoContentRect(video,canvas);
+  for(const stroke of current.strokes){
+    if(!stroke.points.length)continue;
+    context.beginPath();
+    context.strokeStyle=stroke.color;
+    context.lineWidth=stroke.width;
+    context.lineCap='round';
+    context.lineJoin='round';
+    stroke.points.forEach(([x,y],index)=>{const px=rect.x+x*rect.w,py=rect.y+y*rect.h;index?context.lineTo(px,py):context.moveTo(px,py)});
+    context.stroke();
+  }
+}
+
+function setupAnnotation(){
+  const current=S.call;
+  if(!current)return;
+  const canvas=document.querySelector('#call-annotation');
+  const video=document.querySelector('#call-video');
+  if(!canvas||!video)return;
+  current.canvas=canvas;current.canvasContext=canvas.getContext('2d');
+  const redraw=()=>drawAnnotationStrokes();
+  current.resizeHandler=redraw;
+  window.addEventListener('resize',redraw,{passive:true});
+  video.addEventListener('loadedmetadata',redraw);
+  redraw();
+  if(current.role!=='creator'){canvas.style.pointerEvents='none';return}
+  canvas.style.pointerEvents='auto';
+  let drawing=false;
+  canvas.addEventListener('pointerdown',event=>{
+    if(!S.call||S.call.role!=='creator'||!S.call.dc||S.call.dc.readyState!=='open')return;
+    const point=annotationPoint(event);
+    if(!point)return;
+    event.preventDefault();
+    try{canvas.setPointerCapture(event.pointerId)}catch{}
+    drawing=true;
+    const stroke={id:Date.now().toString(36)+Math.random().toString(36).slice(2,7),color:S.call.penColor,width:S.call.penWidth,points:[point]};
+    S.call.strokes.push(stroke);S.call.activeStroke=stroke.id;S.call.pointBuffer=[point];
+    sendAnnotation({type:'stroke-start',id:stroke.id,color:stroke.color,width:stroke.width});
+    drawAnnotationStrokes();
+  });
+  canvas.addEventListener('pointermove',event=>{
+    if(!drawing||!S.call?.activeStroke)return;
+    const point=annotationPoint(event);
+    if(!point)return;
+    const stroke=S.call.strokes.find(item=>item.id===S.call.activeStroke);
+    if(!stroke)return;
+    stroke.points.push(point);S.call.pointBuffer.push(point);
+    if(!S.call.pointFrame)S.call.pointFrame=requestAnimationFrame(()=>{
+      if(!S.call)return;
+      sendAnnotation({type:'stroke-point',id:S.call.activeStroke,points:S.call.pointBuffer});
+      S.call.pointBuffer=[];S.call.pointFrame=null;
+    });
+    drawAnnotationStrokes();
+  });
+  const finish=()=>{
+    if(!drawing)return;
+    drawing=false;
+    if(S.call?.pointFrame&&typeof cancelAnimationFrame==='function'){cancelAnimationFrame(S.call.pointFrame);S.call.pointFrame=null}
+    if(S.call?.activeStroke){
+      if(S.call.pointBuffer.length)sendAnnotation({type:'stroke-point',id:S.call.activeStroke,points:S.call.pointBuffer});
+      sendAnnotation({type:'stroke-end',id:S.call.activeStroke});
+      S.call.pointBuffer=[];S.call.activeStroke=null;
+    }
+  };
+  canvas.addEventListener('pointerup',finish);
+  canvas.addEventListener('pointercancel',finish);
+  canvas.addEventListener('pointerleave',event=>{if(drawing&&event.buttons===0)finish()});
+}
+
+function undoAnnotation(){
+  if(!S.call)return;
+  S.call.strokes.pop();drawAnnotationStrokes();sendAnnotation({type:'undo'});
+}
+
+function clearAnnotation(){
+  if(!S.call)return;
+  S.call.strokes=[];drawAnnotationStrokes();sendAnnotation({type:'clear'});
+}
+
+function handleAnnotation(message){
+  const current=S.call;
+  if(!current||!message)return;
+  if(message.type==='stroke-start')current.strokes.push({id:message.id,color:message.color||'#e7c275',width:Number(message.width)||3,points:[]});
+  else if(message.type==='stroke-point'){
+    const stroke=current.strokes.find(item=>item.id===message.id);
+    if(stroke&&Array.isArray(message.points))stroke.points.push(...message.points);
+  }else if(message.type==='undo')current.strokes.pop();
+  else if(message.type==='clear')current.strokes=[];
+  drawAnnotationStrokes();
+}
+
 const renderEditorBase=renderEditor;
 renderEditor=function(){renderEditorBase();const input=document.querySelector('#video-file');if(input)input.onchange=previewSelectedVideo;const add=document.querySelector('#add-question');if(add)add.onclick=addKnowledgeCheck;showLocalPreview()};
 boot();

@@ -19,7 +19,7 @@ Running `app.py` also starts the media worker, so uploads are processed automati
 
 The worker claims queued video jobs from SQLite, inspects them with FFprobe, and uses FFmpeg to create an H.264/AAC MP4 when the source is not browser playable. When an AI provider is configured it also extracts audio, transcribes speech, and stores a reviewable lesson/question draft. Use `worker.py --once` to process a single queued job. Set `TRAINLY_WORKER_POLL_SECONDS` to change how often it checks for new jobs, or set `TRAINLY_FFMPEG` and `TRAINLY_FFPROBE` to point to the executable paths.
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The app creates `trainly.sqlite3` and stores uploaded videos in `storage/` on first launch. Video processing requires FFprobe on `PATH`; FFmpeg is also needed when a source needs conversion or audio extraction. Set `TRAINLY_FFPROBE` or `TRAINLY_FFMPEG` to use a specific executable. Set `PORT`, `TRAINLY_DB`, or `TRAINLY_STORAGE` to change those locations. `TRAINLY_MAX_VIDEO_BYTES` and `TRAINLY_MAX_VIDEO_SECONDS` set positive integer upload limits (defaults: 1 GiB and 7200 seconds). Set `TRAINLY_SECURE_COOKIE=1` when serving behind HTTPS.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The app creates `trainly.sqlite3` and stores uploaded videos in `storage/` on first launch. Video processing requires FFprobe on `PATH`; FFmpeg is also needed when a source needs conversion or audio extraction. Set `TRAINLY_FFPROBE` or `TRAINLY_FFMPEG` to use a specific executable. Set `PORT`, `TRAINLY_HOST`, `TRAINLY_DB`, or `TRAINLY_STORAGE` to change those locations. `TRAINLY_MAX_VIDEO_BYTES` and `TRAINLY_MAX_VIDEO_SECONDS` set positive integer upload limits (defaults: 1 GiB and 7200 seconds). Set `TRAINLY_SECURE_COOKIE=1` when serving behind HTTPS.
 
 Run the API checks with `.\venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests`. If Node.js is installed, run the editor state check with `node tests\editor_state.test.cjs`.
 
@@ -36,6 +36,34 @@ $env:TRAINLY_AI_TIMEOUT_SECONDS = "600"
 ```
 
 The creator editor warns that uploaded video and transcript content may be sent to the configured provider. Generated transcripts, lessons, and questions are stored as a separate draft for creator review. Applying a draft fills empty sections by default and keeps creator-written content unless the creator chooses to replace it. A failed AI stage leaves the ready video and existing creator edits intact; use **Retry processing** to try again.
+
+## Learner calls (WebRTC)
+
+An assigned learner can open a published module and choose **Call creator**. Calls are one-to-one:
+
+- The learner shares camera and microphone; the creator shares microphone audio and sees the learner video.
+- The creator can draw on the learner video. Annotation strokes travel over a WebRTC data channel, stay live for the call, and are not stored.
+- Calls are peer-to-peer and are **not recorded**. The server stores only call metadata: participants, module, direction, status, timestamps, and duration.
+- When the creator is offline, the attempt is saved as a missed call. The creator can review it in **Calls** and call the learner back when the learner is online.
+- Creator and learner both receive incoming-call prompts while signed in. One call per person at a time.
+
+Media capture requires a secure browser context: use `https://` or `http://127.0.0.1`/`localhost`. For phone testing, run behind HTTPS or provide a local certificate:
+
+```powershell
+$env:TRAINLY_SSL_CERTFILE = "C:\certs\trainly-cert.pem"
+$env:TRAINLY_SSL_KEYFILE = "C:\certs\trainly-key.pem"
+```
+
+STUN is configured by default. Cross-network calls usually need a TURN server such as coturn:
+
+```powershell
+$env:TRAINLY_STUN_URLS = "stun:stun.l.google.com:19302"
+$env:TRAINLY_TURN_URLS = "turn:turn.example.com:3478"
+$env:TRAINLY_TURN_USERNAME = "..."
+$env:TRAINLY_TURN_CREDENTIAL = "..."
+```
+
+The app uses a WebSocket at `/ws/calls` for signaling. The MVP keeps call presence in memory, so run one Uvicorn app worker. A future multi-worker deployment needs shared pub/sub for presence and call events. When a TURN server is configured it relays encrypted media between participants, so choose a TURN service you trust. Call media never touches the Trainly server or storage.
 
 ## Demo accounts
 
@@ -63,6 +91,6 @@ The backup script writes a consistent SQLite copy plus the private `storage/` fi
 
 ## Current scope
 
-The MVP starts with one local workspace and seeded admin, creator, and learner demo users. Workspace membership scopes modules, assignments, attempts, results, and private media. New learner accounts can join through invitation links; invitations are not emailed by the app. Administrators can create creator or learner accounts in a workspace and share a single-use setup link; the app does not send that link by email either. Passwords are stored with PBKDF2 hashes; existing plaintext demo passwords are upgraded when used to sign in. Module authoring, processing jobs, media asset metadata, generated drafts, product events, and learner progress use SQLite. Uploaded videos are inspected for format, codecs, and duration; files that need conversion get a browser playable derivative. Private media and WebVTT captions are served through authenticated routes, with byte-range seeking for video. Each publish snapshots its source and playback media paths, transcript, and passing score, so saved answers remain tied to the version used for that attempt.
+The MVP starts with one local workspace and seeded admin, creator, and learner demo users. Workspace membership scopes modules, assignments, attempts, results, and private media. New learner accounts can join through invitation links; invitations are not emailed by the app. Administrators can create creator or learner accounts in a workspace and share a single-use setup link; the app does not send that link by email either. Passwords are stored with PBKDF2 hashes; existing plaintext demo passwords are upgraded when used to sign in. Module authoring, processing jobs, media asset metadata, generated drafts, call metadata, product events, and learner progress use SQLite. Uploaded videos are inspected for format, codecs, and duration; files that need conversion get a browser playable derivative. Private media and WebVTT captions are served through authenticated routes, with byte-range seeking for video. Each publish snapshots its source and playback media paths, transcript, and passing score, so saved answers remain tied to the version used for that attempt.
 
 Automatic transcription and AI draft generation are available through replaceable provider adapters once a provider is configured. Provider selection, video data handling, retention, account recovery, and production deployment still need an explicit decision. For a public deployment, the app still needs reviewed deployment configuration, HTTPS enforcement at the reverse proxy, account recovery, and the remaining pilot-readiness checks in [`design_plan/checklist.md`](./design_plan/checklist.md).
