@@ -202,11 +202,48 @@ def attempt_state(session, attempt):
                 pass_score=pass_score, passed=bool(attempt['completed'] and score >= pass_score))
 
 
+def explanation_link(session, module, segment_ids, checkpoint):
+    """Resolve a consecutive source passage; reject stale or foreign references."""
+    if not isinstance(segment_ids, list) or not segment_ids or any(not isinstance(x, str) for x in segment_ids):
+        raise ValueError('Select consecutive transcript segments.')
+    segments = list(session.scalars(select(TranscriptSegment).where(TranscriptSegment.module_id == module['id']).order_by(TranscriptSegment.start, TranscriptSegment.ord)))
+    indexes = [i for i, segment in enumerate(segments) if segment.id in segment_ids]
+    selected = [segments[i] for i in indexes]
+    if (not selected or [x.id for x in selected] != segment_ids
+            or indexes != list(range(indexes[0], indexes[0] + len(segment_ids)))
+            or selected[0].start < 0 or selected[-1].end > module['duration']
+            or selected[-1].end > checkpoint
+            or any(x.end <= x.start for x in selected)
+            or any(a.end > b.start for a, b in zip(selected, selected[1:]))):
+        raise ValueError('Select consecutive, nonoverlapping segments ending before the knowledge check.')
+    return dict(segment_ids=segment_ids, start=selected[0].start, end=selected[-1].end,
+                text=' '.join(x.text for x in selected))
+
+
+def invalidate_explanation_links(session, module):
+    removed = []
+    for question in session.scalars(select(Question).where(Question.module_id == module['id'])):
+        if question.explanation_segments:
+            try:
+                explanation_link(session, module, json.loads(question.explanation_segments), question.at)
+            except ValueError:
+                question.explanation_segments = None
+                removed.append(question.id)
+    session.flush()
+    return removed
+
+
 def package(session, module, include_answers=False):
     questions = []
     for item in session.scalars(select(Question).where(Question.module_id == module['id']).order_by(Question.ord)):
         question = dict(id=item.id, prompt=item.prompt, options=json.loads(item.options),
                         explanation=item.explanation, at=item.at, origin=item.origin)
+        question['explanation_link'] = None
+        if item.explanation_segments:
+            try:
+                question['explanation_link'] = explanation_link(session, module, json.loads(item.explanation_segments), item.at)
+            except ValueError:
+                pass
         if include_answers:
             question['answer'] = item.answer
         questions.append(question)

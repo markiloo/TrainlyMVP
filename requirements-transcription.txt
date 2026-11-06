@@ -1,0 +1,6 @@
+-r requirements.txt
+faster-whisper==1.2.1
+# PyAV 19 removed the metadata_errors argument used by faster-whisper 1.2.1.
+av==16.1.0
+# Keep the downloader compatible with the existing FastAPI HTTP client environment.
+huggingface-hub==0.36.0

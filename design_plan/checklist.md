@@ -1,5 +1,15 @@
 # Trainly MVP implementation checklist
 
+## Local transcription and explanation replay
+
+- [x] Verify optional faster-whisper installation on Windows/Python 3.13 and a real English tutorial.
+- [x] Verify CPU INT8 transcription, transcript-only review drafts, status messages, and retry handling.
+- [x] Add creator-selected transcript explanation links, validation, and immutable published snapshots.
+- [x] Add bounded explanation replay with checkpoint enforcement and accessible controls.
+- [x] Add graded retries and review of missed questions after reopening or completion.
+- [x] Verify score/results updates, version isolation, concurrency, and completion preservation.
+- [x] Complete automated tests, desktop/mobile-width verification, screenshots, and setup documentation. See [verification notes](./verification/README.md); physical-phone and broader browser checks remain under pilot readiness.
+
 Use this checklist to track work against the [product requirements](./prd.md) and [web stack decision](./web_stack.md). Checked items describe behavior present in the local MVP as of 2026-11-06; they do not imply production readiness. Update the boxes as work lands. Requirement IDs refer to Section 4.3 of the PRD.
 
 ## 1. Move the existing app to FastAPI first

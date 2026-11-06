@@ -24,7 +24,7 @@ def test_fresh_schema_matches_models_and_reopens(tmp_path):
     upgrade_database(engine)
     upgrade_database(engine)
     with engine.connect() as connection:
-        assert MigrationContext.configure(connection).get_current_revision() == '0006'
+        assert MigrationContext.configure(connection).get_current_revision() == '0007'
         assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
         assert set(Base.metadata.tables) <= set(inspect(connection).get_table_names())
     engine.dispose()
@@ -47,7 +47,7 @@ def test_app_and_worker_start_on_existing_legacy_database(tmp_path):
         result = subprocess.run(args, cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
     with sqlite3.connect(path) as connection:
-        assert connection.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0006'
+        assert connection.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0007'
         assert connection.execute("SELECT password FROM users WHERE id=42").fetchone()[0] == 'hash'
 
 
@@ -82,7 +82,7 @@ def test_legacy_versions_upgrade_without_losing_content(tmp_path, monkeypatch, v
         assert session.get(TrainingModule, 'saved').video == 'private.mp4'
         assert session.get(Lesson, 'lesson').summary == 'Keep this'
     with engine.connect() as connection:
-        assert MigrationContext.configure(connection).get_current_revision() == '0006'
+        assert MigrationContext.configure(connection).get_current_revision() == '0007'
         assert connection.exec_driver_sql('PRAGMA foreign_key_check').fetchall() == []
     backups = list((tmp_path / 'backups').glob('*/*.sqlite3'))
     assert len(backups) == 1

@@ -43,16 +43,47 @@ def _timeout() -> float:
 
 def ai_status() -> dict[str, Any]:
     base = _base_url()
+    local = transcription_backend() == 'local'
     return {
-        "ai_enabled": bool(base),
-        "ai_provider": "OpenAI-compatible" if base else None,
-        "transcription_model": os.environ.get("TRAINLY_TRANSCRIBE_MODEL", "whisper-1"),
-        "draft_model": os.environ.get("TRAINLY_DRAFT_MODEL", "gpt-4o-mini"),
+        "ai_enabled": ai_enabled(),
+        "ai_provider": 'Local Whisper (CPU)' if local else 'OpenAI-compatible' if base else None,
+        "transcription_backend": transcription_backend(),
+        "transcription_model": os.environ.get('TRAINLY_LOCAL_TRANSCRIBE_MODEL', 'small.en') if local else os.environ.get("TRAINLY_TRANSCRIBE_MODEL", "whisper-1"),
+        "draft_model": None if local else os.environ.get("TRAINLY_DRAFT_MODEL", "gpt-4o-mini"),
     }
 
 
 def ai_enabled() -> bool:
-    return bool(_base_url())
+    return transcription_backend() != 'disabled'
+
+
+def transcription_backend():
+    backend = os.environ.get('TRAINLY_TRANSCRIPTION_BACKEND', 'http' if _base_url() else 'disabled')
+    if backend not in ('disabled', 'local', 'http'):
+        raise ProviderNotConfigured('Choose disabled, local, or http for transcription.')
+    return backend
+
+
+def transcribe_local(path, duration):
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise ProviderError('The AI provider local transcription dependency is missing. Install requirements-transcription.txt.') from exc
+    model = None
+    try:
+        threads = int(os.environ.get('TRAINLY_TRANSCRIPTION_THREADS', '4'))
+        if threads < 1:
+            raise ValueError('Invalid thread count')
+        model = WhisperModel(os.environ.get('TRAINLY_LOCAL_TRANSCRIBE_MODEL', 'small.en'),
+                             device='cpu', compute_type='int8', cpu_threads=threads)
+        segments, _ = model.transcribe(str(path), language='en', vad_filter=True)
+        return validate_transcript({'segments': [dict(start=s.start, end=s.end, text=s.text) for s in segments]}, duration)
+    except ProviderError:
+        raise
+    except Exception as exc:
+        raise ProviderError('The AI provider local transcription failed. Check model availability and thread configuration, then retry.') from exc
+    finally:
+        del model
 
 
 def _headers() -> dict[str, str]:
@@ -75,6 +106,10 @@ def _request_error(response: httpx.Response) -> ProviderError:
 
 def transcribe_audio(path: Path, duration: float) -> list[dict[str, Any]]:
     """Return validated, ordered timestamped segments for an audio file."""
+    if transcription_backend() == 'local':
+        return transcribe_local(path, duration)
+    if transcription_backend() == 'disabled':
+        raise ProviderNotConfigured('Automatic transcription is not configured.')
     base = _base_url()
     if not base:
         raise ProviderNotConfigured("Automatic transcription is not configured.")

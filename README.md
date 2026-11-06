@@ -25,7 +25,55 @@ Run the API checks with `.\venv\Scripts\python.exe -m pytest -q -p no:cacheprovi
 
 ## Automatic transcription (optional)
 
-Automatic processing is disabled until a provider is configured. The adapters use an OpenAI-compatible HTTP API; provider choice and data handling remain a deployment decision. Set:
+For local CPU transcription, install `requirements-transcription.txt` and set
+`TRAINLY_TRANSCRIPTION_BACKEND=local`. This uses `small.en`, INT8, English,
+and four CPU threads. Override the model name or local model directory with
+`TRAINLY_LOCAL_TRANSCRIBE_MODEL` and threads with `TRAINLY_TRANSCRIPTION_THREADS`.
+The first use downloads the model; subsequent runs use its cache. Audio stays
+local in this mode and only a reviewable transcript is generated. Lessons and
+questions remain manually authored. Set the backend to `disabled` to disable
+automatic processing or `http` to use the existing hosted pipeline.
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements-transcription.txt
+$env:TRAINLY_TRANSCRIPTION_BACKEND = "local"
+.\venv\Scripts\python.exe app.py
+```
+
+The first local transcription needs Internet access to download the model;
+cached model files or a model directory can be used afterward. No audio or
+transcript is sent to an AI provider in local mode. Process one video at a time;
+expect roughly 2–3 GB of available RAM for transcription. Review technical
+terms and timestamps before applying the draft. Transcription errors leave the
+video playable and can be retried through the upload controls.
+
+## Linked explanations and retries
+
+In the creator editor, choose **Link explanation** on a knowledge check. The
+editor saves current changes first. Select the first and last consecutive
+transcript segments that explain the answer, then save the link. The passage
+must finish before the question checkpoint. **Preview passage** plays that
+range; **Unlink** removes it when you save. Publish to share the link with
+learners. Published passages stay tied to their module version. Replacing a
+video or transcript clears affected draft links; select the passages again.
+
+After a wrong answer, learners can review the linked clip, retry directly, or
+continue. Review stops at the passage end and returns to the question. The
+latest submitted answer replaces the previous grade; correct answers are final.
+**Review missed questions** keeps incorrect answers available after continuing
+or completing the module. Reopening resumes the latest attempt on the current
+published version. **Start new attempt** creates another attempt without
+deleting previous results; **Reset progress** retains its existing reset behavior.
+Retries update scores and passing status without adding an attempt or changing
+the original completion time. Unanswered checkpoints still take priority during
+review.
+
+Run the player checks with `node tests/player_review.test.cjs`. Verification
+notes and UI screenshots are in [design_plan/verification](./design_plan/verification).
+
+## Hosted AI processing (optional)
+
+For hosted transcription and text generation, the adapters use an OpenAI-compatible HTTP API. Provider choice and data handling remain a deployment decision. Set:
 
 ```powershell
 $env:TRAINLY_AI_BASE_URL = "https://api.openai.com/v1"  # or a self-hosted compatible endpoint

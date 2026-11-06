@@ -99,6 +99,7 @@ class Question(Base):
     explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
     at: Mapped[float | None] = mapped_column(REAL, nullable=True)
     origin: Mapped[str] = mapped_column(Text, nullable=False, server_default=sql_text("'manual'"))
+    explanation_segments: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 class TranscriptSegment(Base):
     __tablename__ = 'transcript_segments'

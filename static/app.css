@@ -79,3 +79,4 @@
 .pill.call-ringing{background:#fff2d9;color:#80652e}
 .pill.call-missed,.pill.call-declined,.pill.call-cancelled,.pill.call-failed{background:#f8e5e3;color:var(--red)}
 @media(max-width:580px){.call-layer{padding:8px}.call-panel{padding:14px}.call-head{display:block}.call-head-actions{margin-top:10px}.call-tools{gap:7px}}
+.explanation-controls{margin-top:12px;padding:12px;background:var(--ivory);border-radius:8px;display:flex;flex-wrap:wrap;gap:8px}.explanation-controls p{flex-basis:100%;margin:0}.quiz-box .actions{display:flex;flex-wrap:wrap;gap:8px}.quiz-box fieldset{border:0;padding:0;margin:0 0 12px}#missed-questions{display:grid;gap:8px}

@@ -182,7 +182,9 @@ def process_one():
                 except ValueError as exc:
                     transcript_state = "failed"
                     error = safe_inspection_error(exc)
-                if transcript:
+                if transcript and providers.transcription_backend() == 'local':
+                    notice = 'Local transcript ready for review. Add lessons and questions manually.'
+                if transcript and providers.transcription_backend() != 'local':
                     stage = "generation"
                     set_stage(job["id"], "generation")
                     try:

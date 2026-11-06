@@ -26,6 +26,7 @@ from data import (
     password_matches, published_package, record_event,
 )
 from providers import ai_status
+from data import explanation_link, invalidate_explanation_links
 
 logger = logging.getLogger("trainly")
 
@@ -430,6 +431,9 @@ def player_view(mid: str, request: Request, attempt_id: str, user=Depends(requir
         if attempt['module_id'] != mid:
             fail(404, 'Attempt not found.')
         state = attempt_state(session, attempt)
+        module = attempt_snapshot(session, attempt)
+        for question in module['questions']:
+            question.pop('answer', None)
     initial = next((lesson for lesson in module['lessons'] if lesson['start'] <= state['position'] < lesson['end']),
                    module['lessons'][0] if module['lessons'] else None)
     return templates.TemplateResponse(request, 'shell.html', {
@@ -743,9 +747,9 @@ def results(mid: str, user=Depends(require_user)):
     with connection() as c:
         m = owned_module(c, mid, user)
         rows = c.execute('''SELECT users.name,users.email,
-            (SELECT score FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS score,
-            (SELECT started FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS started,
-            (SELECT completed FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC LIMIT 1) AS completed_at,
+            (SELECT score FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC, x.rowid DESC LIMIT 1) AS score,
+            (SELECT started FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC, x.rowid DESC LIMIT 1) AS started,
+            (SELECT completed FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner ORDER BY started DESC, x.rowid DESC LIMIT 1) AS completed_at,
             (SELECT COUNT(*) FROM attempts x WHERE x.module_id=assignments.module_id AND x.learner=assignments.learner) AS attempt_count
             FROM assignments JOIN users ON users.id=assignments.learner WHERE assignments.module_id=? ORDER BY users.name''', (mid,)).fetchall()
         result = []
@@ -1044,6 +1048,7 @@ async def upload(mid: str, file: UploadFile | None = File(None), user=Depends(cr
             c.execute("INSERT INTO processing_jobs(id,module_id,workspace_id,asset,filename,extension,stage,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'inspection','queued',?,?)", (job_id, mid, user["workspace_id"], asset, filename, ext, now, now))
             previous = c.execute("SELECT upload_job_id FROM modules WHERE id=?", (mid,)).fetchone()["upload_job_id"]
             c.execute("UPDATE modules SET upload_job_id=? WHERE id=?", (job_id, mid))
+            c.execute('UPDATE questions SET explanation_segments=NULL WHERE module_id=?', (mid,))
             if previous:
                 old_job = c.execute("SELECT asset,state FROM processing_jobs WHERE id=?", (previous,)).fetchone()
                 c.execute("UPDATE processing_jobs SET state='superseded',updated_at=? WHERE id=? AND state IN ('queued','failed')", (now, previous))
@@ -1158,6 +1163,7 @@ async def apply_module_draft(mid: str, request: Request, user=Depends(creator)):
             else:
                 if replace:
                     c.execute("DELETE FROM transcript_segments WHERE module_id=?", (mid,))
+                    c.execute('UPDATE questions SET explanation_segments=NULL WHERE module_id=?', (mid,))
                 for i, item in enumerate(draft["transcript"]):
                     start, end = finite_number(item.get("start")), finite_number(item.get("end"))
                     text = item.get("text")
@@ -1203,7 +1209,7 @@ async def apply_module_draft(mid: str, request: Request, user=Depends(creator)):
                     c.execute("DELETE FROM questions WHERE module_id=?", (mid,))
                 for i, item in enumerate(draft["questions"]):
                     c.execute(
-                        "INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,'generated')",
+                        "INSERT INTO questions(id,module_id,ord,prompt,options,answer,explanation,at,origin) VALUES(?,?,?,?,?,?,?,?,'generated')",
                         (uuid.uuid4().hex, mid, i, item["prompt"], json.dumps(item["options"]), item["answer"], item["explanation"], item["at"]),
                     )
                 applied.append("questions")
@@ -1314,12 +1320,24 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
                     fail(400, "Place each knowledge check inside a lesson range or at the end of the video.")
                 origin = item.get("origin", "manual") if item.get("origin") in ("manual", "generated") else "manual"
                 c.execute("INSERT INTO questions(id,module_id,ord,prompt,options,answer,explanation,at,origin) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ord=excluded.ord,prompt=excluded.prompt,options=excluded.options,answer=excluded.answer,explanation=excluded.explanation,at=excluded.at", (item_id, mid, i, prompt.strip(), json.dumps(options), answer, explanation, at, origin))
+                if 'explanation_link' in item:
+                    link = item['explanation_link']
+                    if link is not None:
+                        try:
+                            link = explanation_link(c, m, link.get('segment_ids') if isinstance(link, dict) else None, at)
+                        except ValueError as exc:
+                            fail(400, str(exc))
+                    c.execute('UPDATE questions SET explanation_segments=? WHERE id=?',
+                              (json.dumps(link['segment_ids']) if link else None, item_id))
         if ids:
             placeholders = ",".join("?" for _ in ids)
             c.execute(f"DELETE FROM {table} WHERE module_id=? AND id NOT IN ({placeholders})", [mid, *ids])
         else:
             c.execute(f"DELETE FROM {table} WHERE module_id=?", (mid,))
-        return package(c, module_row(c, mid), True)
+        removed = invalidate_explanation_links(c, module_row(c, mid))
+        result = package(c, module_row(c, mid), True)
+        result['cleared_explanation_links'] = removed
+        return result
 
 
 @app.patch("/api/modules/{mid}/publish")
@@ -1370,10 +1388,13 @@ async def start_attempt(request: Request, user=Depends(require_csrf)):
     data = await body_json(request)
     mid = data.get("module_id")
     with connection() as c:
+        c.execute('BEGIN IMMEDIATE')
         m = module_row(c, mid)
         if not m or user["workspace_role"] != "learner" or not can_view(c, m, user):
             fail(404, "Assigned published module not found.")
-        attempt = c.execute("SELECT * FROM attempts WHERE module_id=? AND learner=? AND version=? AND completed IS NULL ORDER BY started DESC LIMIT 1", (mid, user["id"], m["published_version"])).fetchone()
+        if type(data.get('new_attempt', False)) is not bool:
+            fail(400, 'Invalid new attempt flag.')
+        attempt = None if data.get('new_attempt') else c.execute("SELECT * FROM attempts WHERE module_id=? AND learner=? AND version=? ORDER BY started DESC, rowid DESC LIMIT 1", (mid, user["id"], m["published_version"])).fetchone()
         if not attempt:
             aid = uuid.uuid4().hex
             c.execute("INSERT INTO attempts(id,module_id,learner,started,version) VALUES(?,?,?,?,?)", (aid, mid, user["id"], int(time.time()), m["published_version"]))
@@ -1470,6 +1491,47 @@ async def answer(aid: str, request: Request, user=Depends(require_csrf)):
             "passed": completed["passed"] or bool(attempt["completed"] and score >= completed["pass_score"]),
             "completed": completed["completed"] or bool(attempt["completed"]),
         }
+
+
+@app.get('/api/attempts/{aid}')
+def inspect_attempt(aid: str, user=Depends(require_user)):
+    with connection() as c:
+        attempt = owned_attempt(c, aid, user)
+        snapshot = attempt_snapshot(c, attempt)
+        for question in snapshot['questions']:
+            question.pop('answer', None)
+        answers = [dict(row) for row in c.execute(
+            'SELECT question_id,choice,correct FROM answers WHERE attempt_id=?', (aid,)).fetchall()]
+        return {**attempt_state(c, attempt), 'module': snapshot, 'answers': answers}
+
+
+@app.post('/api/attempts/{aid}/questions/{qid}/retry')
+async def retry_answer(aid: str, qid: str, request: Request, user=Depends(require_csrf)):
+    data = await body_json(request)
+    with connection() as c:
+        c.execute('BEGIN IMMEDIATE')
+        attempt = owned_attempt(c, aid, user)
+        snapshot = attempt_snapshot(c, attempt)
+        question = next((q for q in snapshot['questions'] if q['id'] == qid), None)
+        if not question:
+            fail(404, 'Question not found in this module version.')
+        choice = data.get('choice')
+        if type(choice) is not int or choice not in range(len(question['options'])):
+            fail(400, 'Choose one of the available answers.')
+        previous = c.execute('SELECT correct FROM answers WHERE attempt_id=? AND question_id=?', (aid, qid)).fetchone()
+        if previous is None or previous['correct']:
+            fail(409, 'Only an incorrect answer can be retried.')
+        correct = choice == question['answer']
+        c.execute('UPDATE answers SET choice=?,correct=? WHERE attempt_id=? AND question_id=?', (choice, int(correct), aid, qid))
+        score = round(c.execute('SELECT AVG(correct)*100 FROM answers WHERE attempt_id=?', (aid,)).fetchone()[0] or 0)
+        result = completion(c, attempt, snapshot, score)
+        result['completed'] = result['completed'] or bool(attempt['completed'])
+        result['passed'] = bool(result['completed'] and score >= result['pass_score'])
+        c.execute('UPDATE attempts SET score=? WHERE id=?', (score, aid))
+        record_event(c, 'answer_retried', user['workspace_id'], user['id'], attempt['module_id'],
+                     {'attempt_id': aid, 'question_id': qid, 'correct': correct})
+        return {**result, 'completed': result['completed'] or bool(attempt['completed']),
+                'correct': correct, 'explanation': question['explanation']}
 
 
 def websocket_origin_ok(socket):
