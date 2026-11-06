@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-Trainly is a local video-training MVP built with FastAPI, SQLite, and vanilla JavaScript. `app.py` defines HTTP routes, authentication, private media delivery, and WebSocket call signaling. `data.py` owns database helpers, validation, and media utilities; `migrations.py` contains versioned SQLite migrations. `worker.py` processes durable media jobs, and `providers.py` integrates optional AI services.
+Trainly is a local video-training MVP built with FastAPI, SQLite, and vanilla JavaScript. `app.py` defines HTTP routes, authentication, private media delivery, and WebSocket call signaling. `data.py` owns content helpers, validation, and media utilities; `models.py` defines SQLAlchemy models, `database.py` configures engines and sessions, and `migrations.py` bridges legacy databases into the Alembic revisions in `alembic/versions/`. `worker.py` processes durable media jobs, and `providers.py` integrates optional AI services.
 
-The browser shell lives in `templates/index.html`, with behavior and styles in `static/app.js` and `static/app.css`. Tests live in `tests/`. Product requirements, visual guidance, and implementation tracking live in `design_plan/`. `scripts/backup.py` backs up the database and private `storage/` files.
+Jinja2 page and fragment templates live in `templates/`, with interactive behavior and styles in `static/app.js` and `static/app.css`. Tests live in `tests/`. Product requirements, visual guidance, and implementation tracking live in `design_plan/`. `scripts/backup.py` backs up the database and private `storage/` files.
 
 ## Build, Test, and Development Commands
 
@@ -24,7 +24,7 @@ These install dependencies, start the app at `http://127.0.0.1:8000` with its me
 
 Use four-space Python indentation, `snake_case` functions and variables, and `PascalCase` classes. Follow nearby JavaScript conventions: `camelCase` functions and compact formatting. Keep CSS in `static/app.css`. No formatter or linter is configured.
 
-Preserve existing `/api` paths and response shapes. Keep database transactions short and media or provider work outside write transactions. Use the existing migration mechanism for schema changes; SQLAlchemy, Alembic, and Jinja2 adoption remains planned work.
+Preserve existing `/api` paths and response shapes. Keep database transactions short and media or provider work outside write transactions. Use explicit SQLAlchemy sessions and add Alembic revisions for schema changes; never edit applied revisions. Keep Jinja2 HTML autoescaping enabled. Preserve the legacy `PRAGMA user_version` upgrade bridge.
 
 ## Testing Guidelines
 

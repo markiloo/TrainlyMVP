@@ -8,6 +8,9 @@ import time
 from pathlib import Path
 
 import providers
+from sqlalchemy import select, update
+from models import ProcessingJob, MediaAsset, TrainingModule
+from data import model_record
 from data import (
     FILES,
     db,
@@ -51,161 +54,80 @@ def safe_inspection_error(error):
 
 def claim_job():
     """Recover stale claims and atomically claim the oldest queued job."""
-    c = db()
-    try:
-        c.execute("BEGIN IMMEDIATE")
+    with db() as session, session.begin():
+        session.execute('BEGIN IMMEDIATE')
         now = int(time.time())
-        c.execute(
-            "UPDATE processing_jobs SET state='queued',claimed_at=NULL,updated_at=? "
-            "WHERE state='processing' AND claimed_at<?",
-            (now, now - CLAIM_TIMEOUT_SECONDS),
-        )
-        job = c.execute(
-            "SELECT * FROM processing_jobs WHERE state='queued' "
-            "ORDER BY created_at,id LIMIT 1"
-        ).fetchone()
-        if job:
-            c.execute(
-                "UPDATE processing_jobs SET state='processing',stage='inspection',claimed_at=?,updated_at=?,error=NULL,message=NULL WHERE id=?",
-                (now, now, job["id"]),
-            )
-            c.execute("UPDATE media_assets SET state='processing' WHERE id=?", (job["id"],))
-        c.commit()
-        return dict(job) if job else None
-    except Exception:
-        c.rollback()
-        raise
-    finally:
-        c.close()
+        session.execute(update(ProcessingJob).where(
+            ProcessingJob.state == 'processing', ProcessingJob.claimed_at < now - CLAIM_TIMEOUT_SECONDS
+        ).values(state='queued', claimed_at=None, updated_at=now))
+        job = session.scalar(select(ProcessingJob).where(ProcessingJob.state == 'queued').order_by(ProcessingJob.created_at, ProcessingJob.id).limit(1))
+        if job is None:
+            return None
+        result = dict(model_record(job))
+        job.state, job.stage, job.claimed_at, job.updated_at = 'processing', 'inspection', now, now
+        job.error, job.message = None, None
+        asset = session.get(MediaAsset, job.id)
+        if asset:
+            asset.state = 'processing'
+        return result
 
 
 def finish_job(
-    job,
-    details=None,
-    playback_path=None,
-    audio_path=None,
-    transcript=None,
-    lessons=None,
-    questions=None,
-    title="",
-    description="",
-    transcript_state="skipped",
-    draft_state="skipped",
-    provider=None,
-    notice=None,
-    error=None,
-    failed_stage="inspection",
+    job, details=None, playback_path=None, audio_path=None, transcript=None,
+    lessons=None, questions=None, title='', description='', transcript_state='skipped',
+    draft_state='skipped', provider=None, notice=None, error=None, failed_stage='inspection',
 ):
-    """Save the result only if this job is still the module's active upload."""
-    c = db()
+    """Save a stage result in one short transaction, after provider/media work."""
     discard_asset = False
-    try:
-        c.execute("BEGIN IMMEDIATE")
+    with db() as session, session.begin():
+        session.execute('BEGIN IMMEDIATE')
         now = int(time.time())
-        row = c.execute(
-            "SELECT state FROM processing_jobs WHERE id=?", (job["id"],)
-        ).fetchone()
-        if not row or row["state"] != "processing":
-            c.rollback()
+        row = session.get(ProcessingJob, job['id'])
+        if row is None or row.state != 'processing':
             return
-        module = c.execute(
-            "SELECT upload_job_id FROM modules WHERE id=?", (job["module_id"],)
-        ).fetchone()
-        active = module and module["upload_job_id"] == job["id"]
-        if not active:
-            c.execute(
-                "UPDATE processing_jobs SET state='superseded',updated_at=?,claimed_at=NULL WHERE id=?",
-                (now, job["id"]),
-            )
-            c.execute("UPDATE media_assets SET state='superseded' WHERE id=?", (job["id"],))
+        module = session.get(TrainingModule, job['module_id'])
+        asset = session.get(MediaAsset, job['id'])
+        if not module or module.upload_job_id != job['id']:
+            row.state, row.updated_at, row.claimed_at = 'superseded', now, None
+            if asset:
+                asset.state = 'superseded'
             discard_asset = True
         elif details is None:
-            c.execute(
-                "UPDATE processing_jobs SET state='failed',stage=?,updated_at=?,claimed_at=NULL,error=? WHERE id=?",
-                (failed_stage, now, error or "Video processing failed. You can retry this job.", job["id"]),
-            )
-            c.execute("UPDATE media_assets SET state='failed' WHERE id=?", (job["id"],))
-            record_event(c, "video_processing_failed", job.get("workspace_id"), None, job["module_id"], {"job_id": job["id"], "stage": failed_stage})
+            row.state, row.stage, row.updated_at, row.claimed_at = 'failed', failed_stage, now, None
+            row.error = error or 'Video processing failed. You can retry this job.'
+            if asset:
+                asset.state = 'failed'
+            record_event(session, 'video_processing_failed', job.get('workspace_id'), None, job['module_id'], {'job_id': job['id'], 'stage': failed_stage})
         else:
-            c.execute(
-                "UPDATE media_assets SET playback_path=?,container=?,video_codec=?,audio_codec=?,duration=?,state='ready' WHERE id=?",
-                (
-                    Path(playback_path).name,
-                    ",".join(details["container"]),
-                    details["video_codec"],
-                    details["audio_codec"],
-                    details["duration"],
-                    job["id"],
-                ),
-            )
-            c.execute(
-                "UPDATE modules SET video=?,playback_video=?,media_asset_id=?,duration=? WHERE id=? AND upload_job_id=?",
-                (
-                    job["asset"],
-                    Path(playback_path).name,
-                    job["id"],
-                    details["duration"],
-                    job["module_id"],
-                    job["id"],
-                ),
-            )
+            if asset:
+                asset.playback_path = Path(playback_path).name
+                asset.container = ','.join(details['container'])
+                asset.video_codec, asset.audio_codec = details['video_codec'], details['audio_codec']
+                asset.duration, asset.state = details['duration'], 'ready'
+            module.video, module.playback_video = job['asset'], Path(playback_path).name
+            module.media_asset_id, module.duration = job['id'], details['duration']
             if transcript:
-                save_generated_draft(
-                    c,
-                    job["module_id"],
-                    transcript,
-                    lessons or [],
-                    questions or [],
-                    title=title,
-                    description=description,
-                    provider=provider,
-                    state="ready" if draft_state == "ready" else "transcript_ready",
-                    error=error,
-                )
-            c.execute(
-                "UPDATE processing_jobs SET state='ready',stage='complete',duration=?,updated_at=?,claimed_at=NULL,"
-                "error=?,audio_path=?,transcript_state=?,draft_state=?,provider=?,message=? WHERE id=?",
-                (
-                    details["duration"],
-                    now,
-                    error,
-                    Path(audio_path).name if audio_path else None,
-                    transcript_state,
-                    draft_state,
-                    provider,
-                    notice,
-                    job["id"],
-                ),
-            )
-            record_event(
-                c,
-                "video_processing_completed",
-                job.get("workspace_id"),
-                None,
-                job["module_id"],
-                {"job_id": job["id"], "duration": details["duration"], "transcript_state": transcript_state, "draft_state": draft_state, "ai_error": bool(error)},
-            )
-        c.commit()
-    except Exception:
-        c.rollback()
-        raise
-    finally:
-        c.close()
+                save_generated_draft(session, job['module_id'], transcript, lessons or [], questions or [],
+                                     title=title, description=description, provider=provider,
+                                     state='ready' if draft_state == 'ready' else 'transcript_ready', error=error)
+            row.state, row.stage, row.duration = 'ready', 'complete', details['duration']
+            row.updated_at, row.claimed_at, row.error = now, None, error
+            row.audio_path = Path(audio_path).name if audio_path else None
+            row.transcript_state, row.draft_state = transcript_state, draft_state
+            row.provider, row.message = provider, notice
+            record_event(session, 'video_processing_completed', job.get('workspace_id'), None, job['module_id'],
+                         {'job_id': job['id'], 'duration': details['duration'], 'transcript_state': transcript_state,
+                          'draft_state': draft_state, 'ai_error': bool(error)})
     if discard_asset:
-        stem = Path(job["asset"]).stem
-        (FILES / Path(job["asset"]).name).unlink(missing_ok=True)
-        (FILES / f"{stem}-playback.mp4").unlink(missing_ok=True)
-        (FILES / f"{stem}-audio.wav").unlink(missing_ok=True)
+        stem = Path(job['asset']).stem
+        (FILES / Path(job['asset']).name).unlink(missing_ok=True)
+        (FILES / f'{stem}-playback.mp4').unlink(missing_ok=True)
+        (FILES / f'{stem}-audio.wav').unlink(missing_ok=True)
 
 
 def set_stage(job_id, stage):
-    c = db()
-    try:
-        now = int(time.time())
-        c.execute("UPDATE processing_jobs SET stage=?,updated_at=? WHERE id=? AND state='processing'", (stage, now, job_id))
-        c.commit()
-    finally:
-        c.close()
+    with db() as session, session.begin():
+        session.execute(update(ProcessingJob).where(ProcessingJob.id == job_id, ProcessingJob.state == 'processing').values(stage=stage, updated_at=int(time.time())))
 
 
 def process_one():

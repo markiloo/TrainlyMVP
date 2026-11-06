@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from starlette.templating import Jinja2Templates
+from datetime import datetime
 
 from data import (
     COOKIE_SECURE, FILES, ROOT, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, attempt_snapshot, attempt_state, captions_vtt, db,
@@ -327,32 +329,113 @@ def finish_call(c, row, status, user_id, reason=None):
     )
 
 
-@app.get("/", response_class=HTMLResponse)
-@app.get("/index.html", response_class=HTMLResponse)
-def index():
-    return (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+templates = Jinja2Templates(directory=str(ROOT / 'templates'))
+templates.env.filters['date'] = lambda value: datetime.fromtimestamp(value).strftime('%Y-%m-%d') if value else '\u2014'
+templates.env.filters['video_time'] = lambda value: f'{int(value or 0) // 60}:{int(value or 0) % 60:02d}'
 
 
-@app.get("/admin", response_class=HTMLResponse)
+def page_context(user, admin_mode=False):
+    context = dict(user=user, admin_mode=admin_mode, now=int(time.time()))
+    if not user:
+        context['page_template'] = 'login.html'
+    elif user['workspace_role'] == 'admin':
+        context.update(admin_accounts(user))
+        context.update(page_template='shell.html', content_template='admin_home.html')
+    else:
+        context.update(modules=modules(user), page_template='shell.html',
+                       content_template='creator_home.html' if user['workspace_role'] == 'creator' else 'learner_home.html')
+    return context
+
+
+@app.get('/', response_class=HTMLResponse)
+@app.get('/index.html', response_class=HTMLResponse)
+def index(request: Request):
+    return templates.TemplateResponse(request, 'index.html', page_context(current_user(request)))
+
+
+@app.get('/admin', response_class=HTMLResponse)
 def admin_page(request: Request):
-    """Serve the admin console only to an administrator or a signed-out visitor."""
     user = current_user(request)
-    if user and (user["role"] != "admin" or user["workspace_role"] != "admin"):
-        return HTMLResponse(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-            "<title>Admin access required</title></head><body>"
-            "<main style=\"font-family:Arial,sans-serif;max-width:520px;margin:12vh auto;padding:24px\">"
-            "<h1>Admin access required</h1><p>Sign in with an administrator account to manage accounts.</p>"
-            "<p><a href=\"/\">Return to Trainly</a></p></main></body></html>",
-            status_code=403,
-        )
-    return index()
+    if user and (user['role'] != 'admin' or user['workspace_role'] != 'admin'):
+        return templates.TemplateResponse(request, 'index.html', {'page_template': 'access_denied.html'}, status_code=403)
+    return templates.TemplateResponse(request, 'index.html', page_context(user, admin_mode=True))
 
 
-@app.get("/setup", response_class=HTMLResponse)
-def setup_page():
-    """Serve the one-time account setup screen."""
-    return index()
+@app.get('/setup', response_class=HTMLResponse)
+def setup_page(request: Request):
+    return templates.TemplateResponse(request, 'index.html', {'page_template': 'setup_pending.html'})
+
+
+@app.get('/views/login', response_class=HTMLResponse)
+def login_view(request: Request, admin_mode: bool = False):
+    return templates.TemplateResponse(request, 'login.html', {'admin_mode': admin_mode})
+
+
+@app.post('/views/invitation', response_class=HTMLResponse)
+async def invitation_view(request: Request):
+    return templates.TemplateResponse(request, 'invitation.html', {'info': await get_invitation(request)})
+
+
+@app.post('/views/account-setup', response_class=HTMLResponse)
+async def account_setup_view(request: Request):
+    return templates.TemplateResponse(request, 'account_setup.html', {'info': await inspect_account_setup(request)})
+
+
+@app.get('/views/home', response_class=HTMLResponse)
+def home_view(request: Request, user=Depends(require_user)):
+    context = page_context(user)
+    return templates.TemplateResponse(request, 'shell.html', context)
+
+
+@app.get('/views/modules', response_class=HTMLResponse)
+def modules_view(request: Request, user=Depends(creator_read)):
+    return templates.TemplateResponse(request, 'modules.html', {'modules': modules(user)})
+
+
+@app.get('/views/results', response_class=HTMLResponse)
+def results_view(request: Request, mid: str | None = None, user=Depends(creator_read)):
+    if mid:
+        rows = results(mid, user)
+        module = get_module(mid, user)
+    else:
+        module, rows = None, []
+        for item in modules(user):
+            if item['status'] == 'published':
+                rows.extend(dict(row, module_title=item['title']) for row in results(item['id'], user))
+    context = {'rows': rows, 'module': module, 'user': user, 'content_template': 'results.html'}
+    return templates.TemplateResponse(request, 'shell.html' if mid else 'results.html', context)
+
+
+@app.get('/views/editor/{mid}', response_class=HTMLResponse)
+def editor_view(mid: str, request: Request, user=Depends(creator_read)):
+    with connection() as session:
+        owned_module(session, mid, user)
+        draft = generated_draft(session, mid)
+    module = get_module(mid, user)
+    module['lessons'] = [lesson for lesson in module['lessons'] if not (
+        lesson['title'] == 'Introduction' and lesson['summary'] == 'Add a short overview for learners.'
+        and lesson['start'] == 0 and lesson['end'] == 0
+    )]
+    return templates.TemplateResponse(request, 'shell.html', {
+        'user': user, 'content_template': 'editor.html', 'module': module,
+        'config': config(), 'draft': draft,
+    })
+
+
+@app.get('/views/player/{mid}', response_class=HTMLResponse)
+def player_view(mid: str, request: Request, attempt_id: str, user=Depends(require_user)):
+    module = get_module(mid, user)
+    with connection() as session:
+        attempt = owned_attempt(session, attempt_id, user)
+        if attempt['module_id'] != mid:
+            fail(404, 'Attempt not found.')
+        state = attempt_state(session, attempt)
+    initial = next((lesson for lesson in module['lessons'] if lesson['start'] <= state['position'] < lesson['end']),
+                   module['lessons'][0] if module['lessons'] else None)
+    return templates.TemplateResponse(request, 'shell.html', {
+        'user': user, 'content_template': 'player.html', 'module': module,
+        'attempt': state, 'initial': initial,
+    })
 
 
 @app.get("/app.css")

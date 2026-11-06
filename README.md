@@ -1,6 +1,6 @@
 # Trainly MVP
 
-Trainly turns training into a module with lessons, timed knowledge checks, and learner results. This local MVP uses FastAPI, Uvicorn, SQLite, and a small vanilla JavaScript frontend.
+Trainly turns training into a module with lessons, timed knowledge checks, and learner results. This local MVP uses FastAPI, Uvicorn, SQLAlchemy 2.x with SQLite, Alembic migrations, and Jinja2 pages with vanilla JavaScript interactions.
 
 ## Run locally
 
@@ -81,7 +81,24 @@ The bundled `vids/sample vid.mp4` is seeded as the published **LTspice model wal
 
 ## Schema migrations
 
-Schema changes live in [`migrations.py`](./migrations.py) and run automatically when the app or worker opens SQLite. Migrations are idempotent and recorded in `PRAGMA user_version`, so existing local databases upgrade in place. Take a backup before upgrading a database that matters.
+SQLAlchemy models live in [`models.py`](./models.py), with engine configuration and explicit sessions in [`database.py`](./database.py). Every connection enables WAL, foreign keys, and the 20-second busy timeout. API operations and worker stages commit or roll back their own short sessions; media and provider work runs outside them. Existing route/report SQL is bound through SQLAlchemy sessions while shared content helpers and the worker use model queries.
+
+Schema changes live in [`alembic/versions`](./alembic/versions). [`migrations.py`](./migrations.py) runs Alembic automatically once at app or worker startup, under a SQLite write lock. Existing databases at `PRAGMA user_version` 0 through 6 are stamped at the corresponding historical revision and upgraded in place; new databases run the complete revision chain. Alembic records subsequent revisions in `alembic_version`. The historical revisions retain `user_version` for compatibility. Do not edit applied revisions; add a new revision for schema changes.
+
+Before changing an existing schema or adopting Alembic, startup creates a consistent database-only snapshot in `backups/pre-alembic-*`. Media files are not changed by these upgrades. Use the full backup command below before upgrading important data to include private media as well. Migrations are forward only; restore a backup to downgrade.
+
+You can also inspect or apply migrations without starting the app (these commands respect `TRAINLY_DB`):
+
+```powershell
+.\venv\Scripts\python.exe -m alembic current
+.\venv\Scripts\python.exe -m alembic upgrade head
+.\venv\Scripts\python.exe -m alembic check
+.\venv\Scripts\python.exe -m alembic revision --autogenerate -m "describe the schema change"
+```
+
+Review generated revisions before applying them, including SQLite batch operations and data preservation. Online database connections are required for the legacy bridge and schema inspection.
+
+Jinja2 templates in `templates/` render sign-in, setup, dashboards, accounts, results, and initial editor/player pages with HTML autoescaping. `/views/*` serves authorized HTML fragments for in-page navigation; the existing `/api/*` JSON contracts remain in place. JavaScript retains unsaved editor updates, video timelines, questions, progress saves, uploads, and WebRTC calls.
 
 ```powershell
 .\venv\Scripts\python.exe scripts\backup.py

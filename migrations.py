@@ -1,158 +1,77 @@
-"""Small, reviewable SQLite schema migrations.
-
-The MVP uses plain SQLite rather than SQLAlchemy/Alembic. Each migration is
-idempotent, runs inside the caller's transaction, and is recorded in
-``PRAGMA user_version`` so existing databases upgrade safely on startup.
-"""
-
-from __future__ import annotations
-
+"""Alembic upgrades, including the one-time PRAGMA user_version bridge."""
+from pathlib import Path
 import sqlite3
+import time
+import uuid
+
+from alembic import command
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Connection
+from sqlalchemy.pool import StaticPool
+
+ROOT = Path(__file__).resolve().parent
+LEGACY_HEAD = 6
 
 
-def _columns(c: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in c.execute(f"PRAGMA table_info({table})")}
+def configuration(connection):
+    config = Config(str(ROOT / 'alembic.ini'))
+    config.set_main_option('script_location', str(ROOT / 'alembic'))
+    config.attributes['connection'] = connection
+    return config
 
 
-def _add_column(c: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    if column not in _columns(c, table):
-        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+def migrate(connection):
+    """Upgrade an explicit SQLAlchemy connection; retain the old utility entry point."""
+    if not isinstance(connection, Connection):
+        # The maintenance caller retains ownership of this borrowed connection.
+        engine = create_engine('sqlite://', creator=lambda: connection, poolclass=StaticPool)
+        with engine.connect() as wrapped:
+            _upgrade(wrapped)
+            wrapped.commit()
+        return
+    _upgrade(connection)
 
 
-def migration_1_workspaces_and_versions(c: sqlite3.Connection) -> None:
-    _add_column(c, "modules", "published_version", "INTEGER NOT NULL DEFAULT 0")
-    _add_column(c, "modules", "workspace_id", "TEXT NOT NULL DEFAULT 'local'")
-    _add_column(c, "modules", "upload_job_id", "TEXT")
-    _add_column(c, "modules", "playback_video", "TEXT NOT NULL DEFAULT ''")
-    _add_column(c, "modules", "media_asset_id", "TEXT")
-    _add_column(c, "module_versions", "playback_video", "TEXT NOT NULL DEFAULT ''")
-    _add_column(c, "module_versions", "media_asset_id", "TEXT")
-    _add_column(c, "attempts", "version", "INTEGER NOT NULL DEFAULT 0")
+def _upgrade(connection):
+    config = configuration(connection)
+    bridge_legacy(connection, config)
+    command.upgrade(config, 'head')
 
 
-def migration_2_passing_score_and_ai_pipeline(c: sqlite3.Connection) -> None:
-    _add_column(c, "modules", "pass_score", "INTEGER NOT NULL DEFAULT 70")
-    _add_column(c, "processing_jobs", "audio_path", "TEXT")
-    _add_column(c, "processing_jobs", "transcript_state", "TEXT NOT NULL DEFAULT 'pending'")
-    _add_column(c, "processing_jobs", "draft_state", "TEXT NOT NULL DEFAULT 'pending'")
-    _add_column(c, "processing_jobs", "provider", "TEXT")
-    _add_column(c, "processing_jobs", "message", "TEXT")
+def bridge_legacy(connection, config):
+    tables = {row[0] for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'alembic_version' not in tables and 'modules' in tables:
+        version = connection.exec_driver_sql('PRAGMA user_version').scalar_one()
+        if not 0 <= version <= LEGACY_HEAD:
+            raise RuntimeError(f'Unsupported legacy database version: {version}')
+        MigrationContext.configure(connection).stamp(ScriptDirectory.from_config(config), f'{version:04}')
 
 
-def migration_3_generated_drafts_and_events(c: sqlite3.Connection) -> None:
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS generated_drafts(
-            module_id TEXT PRIMARY KEY,
-            transcript TEXT NOT NULL DEFAULT '[]',
-            lessons TEXT NOT NULL DEFAULT '[]',
-            questions TEXT NOT NULL DEFAULT '[]',
-            title TEXT NOT NULL DEFAULT '',
-            description TEXT NOT NULL DEFAULT '',
-            provider TEXT,
-            state TEXT NOT NULL DEFAULT 'ready',
-            created_at INTEGER NOT NULL,
-            error TEXT,
-            FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE
-        )"""
-    )
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS events(
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            workspace_id TEXT,
-            user_id INTEGER,
-            module_id TEXT,
-            created_at INTEGER NOT NULL,
-            meta TEXT NOT NULL DEFAULT '{}'
-        )"""
-    )
-    c.execute("CREATE INDEX IF NOT EXISTS events_name_created ON events(name,created_at)")
-    c.execute("CREATE INDEX IF NOT EXISTS events_module ON events(module_id,created_at)")
-
-
-def migration_4_generated_item_origin(c: sqlite3.Connection) -> None:
-    _add_column(c, "lessons", "origin", "TEXT NOT NULL DEFAULT 'manual'")
-    _add_column(c, "questions", "origin", "TEXT NOT NULL DEFAULT 'manual'")
-
-
-def migration_5_admin_accounts_and_setup(c: sqlite3.Connection) -> None:
-    """Add administrator memberships and one-time account setup tokens.
-
-    SQLite cannot alter a CHECK constraint in place, so an older memberships
-    table is rebuilt only when it does not already accept the admin role.
-    """
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS account_setups(
-            token_hash TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,
-            expires INTEGER NOT NULL,
-            accepted INTEGER,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-        )"""
-    )
-    c.execute("CREATE INDEX IF NOT EXISTS account_setups_user ON account_setups(user_id)")
-    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memberships'").fetchone()
-    if row and "'admin'" not in (row[0] or ""):
-        c.execute("ALTER TABLE memberships RENAME TO memberships_legacy")
-        c.execute(
-            """CREATE TABLE memberships(
-                workspace_id TEXT NOT NULL,
-                user_id INTEGER NOT NULL UNIQUE,
-                role TEXT NOT NULL CHECK(role IN ('creator','learner','admin')),
-                PRIMARY KEY(workspace_id,user_id),
-                FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )"""
-        )
-        c.execute("INSERT INTO memberships(workspace_id,user_id,role) SELECT workspace_id,user_id,role FROM memberships_legacy")
-        c.execute("DROP TABLE memberships_legacy")
-
-
-def migration_6_call_inbox(c: sqlite3.Connection) -> None:
-    """Store learner-to-creator call requests, history, and durations."""
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS calls(
-            id TEXT PRIMARY KEY,
-            workspace_id TEXT NOT NULL,
-            module_id TEXT NOT NULL,
-            learner INTEGER NOT NULL,
-            creator INTEGER NOT NULL,
-            initiated_by TEXT NOT NULL DEFAULT 'learner',
-            status TEXT NOT NULL DEFAULT 'ringing',
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            accepted_at INTEGER,
-            ended_at INTEGER,
-            duration INTEGER,
-            ended_by INTEGER,
-            failure_reason TEXT,
-            FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
-            FOREIGN KEY(module_id) REFERENCES modules(id) ON DELETE CASCADE,
-            FOREIGN KEY(learner) REFERENCES users(id),
-            FOREIGN KEY(creator) REFERENCES users(id)
-        )"""
-    )
-    c.execute("CREATE INDEX IF NOT EXISTS calls_creator_created ON calls(creator,created_at)")
-    c.execute("CREATE INDEX IF NOT EXISTS calls_learner_created ON calls(learner,created_at)")
-
-
-MIGRATIONS = (
-    (1, "workspaces and published versions", migration_1_workspaces_and_versions),
-    (2, "passing score and AI pipeline", migration_2_passing_score_and_ai_pipeline),
-    (3, "generated drafts and events", migration_3_generated_drafts_and_events),
-    (4, "generated item origin", migration_4_generated_item_origin),
-    (5, "admin accounts and one-time setup", migration_5_admin_accounts_and_setup),
-    (6, "call inbox", migration_6_call_inbox),
-)
-
-
-def migrate(c: sqlite3.Connection) -> None:
-    version = c.execute("PRAGMA user_version").fetchone()[0]
-    for number, _name, migration in MIGRATIONS:
-        if version >= number:
-            continue
-        # Column checks make older, partially migrated databases safe to open.
-        migration(c)
-        c.execute(f"PRAGMA user_version={int(number)}")
-        version = number
+def upgrade_database(engine, runner=None):
+    """Run once at startup under a SQLite write lock, before opening sessions."""
+    with engine.connect() as connection:
+        tables = {row[0] for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")}
+        current = MigrationContext.configure(connection).get_current_revision()
+        head = ScriptDirectory.from_config(configuration(connection)).get_current_head()
+        needs_backup = 'modules' in tables and current != head
+        connection.commit()
+        if needs_backup and engine.url.database not in (None, '', ':memory:'):
+            destination = ROOT / 'backups' / f'pre-alembic-{time.strftime("%Y%m%d-%H%M%S")}-{uuid.uuid4().hex[:8]}'
+            destination.mkdir(parents=True)
+            # The backup API includes committed WAL pages, unlike copying the main file.
+            with sqlite3.connect(destination / Path(engine.url.database).name) as target:
+                connection.connection.driver_connection.backup(target)
+        try:
+            connection.exec_driver_sql('BEGIN IMMEDIATE')
+            if runner is None:
+                _upgrade(connection)
+            else:
+                bridge_legacy(connection, configuration(connection))
+                runner(connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise

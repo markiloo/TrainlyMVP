@@ -1,0 +1,8 @@
+<div class="titlebar"><h1>My modules</h1><p>Build, publish, and manage your team's training.</p></div>
+<div style="margin-top:22px" class="module-list">
+{% for module in modules %}
+  <article class="module-row"><div><span class="pill {{ module.status }}">{{ module.status }}</span><h3 style="margin-top:7px">{{ module.title }}</h3><p>{{ module.description or 'No description yet' }} · {{ module.lessons|length }} lessons · {{ module.questions|length }} questions</p></div><div style="display:flex;gap:8px">
+    {% if module.status == 'published' %}<button class="button secondary small" data-assign="{{ module.id }}">Assign</button>{% endif %}<button class="button secondary small" data-results="{{ module.id }}">Results</button><button class="button small" data-edit="{{ module.id }}">{{ 'Edit module' if module.status == 'published' else 'Continue editing' }} →</button>
+  </div></article>
+{% else %}<div class="empty">Create your first module to get started.</div>{% endfor %}
+</div>

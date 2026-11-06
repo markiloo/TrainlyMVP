@@ -1,0 +1,1 @@
+{% if module.transcript %}<track kind="captions" srclang="en" label="English" default src="/media/{{ module.id|urlencode }}/captions.vtt{% if module.version %}?version={{ module.version }}{% endif %}">{% endif %}

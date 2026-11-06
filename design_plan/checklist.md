@@ -1,6 +1,6 @@
 # Trainly MVP implementation checklist
 
-Use this checklist to track work against the [product requirements](./prd.md) and [web stack decision](./web_stack.md). Checked items describe behavior present in the local MVP as of 2026-10-30; they do not imply production readiness. Update the boxes as work lands. Requirement IDs refer to Section 4.3 of the PRD.
+Use this checklist to track work against the [product requirements](./prd.md) and [web stack decision](./web_stack.md). Checked items describe behavior present in the local MVP as of 2026-11-06; they do not imply production readiness. Update the boxes as work lands. Requirement IDs refer to Section 4.3 of the PRD.
 
 ## 1. Move the existing app to FastAPI first
 
@@ -12,13 +12,13 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Preserve authorization and byte range seeking on private video responses. (F2, F8)
 - [x] Serve the existing page and static assets through the new app; introduce Jinja2 rendering when page routes need server data.
 - [x] Confirm creator and learner flows against the migrated routes before adding new product features.
-- [x] Move database access into short, explicit units of work; SQLAlchemy models and Alembic migrations remain a separate step.
+- [x] Move database access into short, explicit units of work; SQLAlchemy models and Alembic migrations are now adopted.
 
 ### Adopt SQLAlchemy, Alembic, and Jinja2
 
-- [ ] Replace the raw `sqlite3` schema and query helpers in `data.py` with SQLAlchemy 2.x models and explicit sessions per request and per worker unit of work. Keep write ahead logging, foreign key enforcement, and the busy timeout on every connection, and preserve the current API paths and JSON response shapes.
-- [ ] Convert the hand-written migrations in `migrations.py` to Alembic revisions. Use the existing `PRAGMA user_version` migrations as the baseline so local databases upgrade in place, and confirm the app and worker still open an existing database without manual steps.
-- [ ] Move page rendering from the single client-rendered `templates/index.html` shell to Jinja2 templates with HTML autoescaping enabled for server data. Keep browser behavior that needs immediate interaction, such as the video timeline, knowledge checks, and progress saves, in `static/app.js`.
+- [x] Replace the raw `sqlite3` schema and query helpers in `data.py` with SQLAlchemy 2.x models and explicit sessions per request and per worker unit of work. Keep write ahead logging, foreign key enforcement, and the busy timeout on every connection, and preserve the current API paths and JSON response shapes.
+- [x] Convert the hand-written migrations in `migrations.py` to Alembic revisions. Use the existing `PRAGMA user_version` migrations as the baseline so local databases upgrade in place, and confirm the app and worker still open an existing database without manual steps.
+- [x] Move page rendering from the single client-rendered `templates/index.html` shell to Jinja2 templates with HTML autoescaping enabled for server data. Keep browser behavior that needs immediate interaction, such as the video timeline, knowledge checks, and progress saves, in `static/app.js`.
 
 ## 2. Accounts, workspaces, and assignments
 
@@ -119,7 +119,7 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 ## 8. Operations, privacy, and pilot readiness
 
 - [x] Configure SQLite foreign keys, write ahead logging, and a busy timeout for the API and worker.
-- [x] Add reviewed schema migrations for existing data and future workspace, transcript, and job tables. `migrations.py` applies idempotent migrations recorded in `PRAGMA user_version`.
+- [x] Add reviewed schema migrations for existing data and future workspace, transcript, and job tables. `migrations.py` bridges legacy `PRAGMA user_version` databases into Alembic; reviewed revisions live in `alembic/versions/` and subsequent versions are tracked in `alembic_version`.
 - [ ] Deploy one writable Uvicorn app instance and one worker behind HTTPS with persistent database and media volumes.
 - [x] Back up and restore both SQLite data and private media as a documented recovery procedure. `scripts/backup.py` writes a consistent database copy, media copy, and manifest; the README documents restore steps.
 - [ ] Define video, transcript, and generated-artifact retention and deletion rules before production use.

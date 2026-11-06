@@ -1,0 +1,2 @@
+<header class="topbar">{% include 'brand.html' %}<nav class="topnav"><span>{{ user.name }} · {{ 'Creator workspace' if user.role == 'creator' else 'Admin console' if user.role == 'admin' else 'Learner space' }}</span><button data-logout>Sign out</button></nav></header>
+<main class="shell">{% include content_template %}</main>

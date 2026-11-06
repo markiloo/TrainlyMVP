@@ -1,0 +1,8 @@
+<main class="login-wrap">
+  <section class="login-brand">{% include 'brand.html' %}<div><span class="eyebrow" style="color:var(--gold)">LEARNING THAT MOVES WORK FORWARD</span><h1>Turn good work into great learning.</h1><p>Bring training to life with focused lessons, thoughtful check-ins, and progress your team can see.</p></div><small style="color:var(--mist)">A simpler way to learn at work.</small><i class="orb"></i></section>
+  <section class="login-side"><form class="login-box" id="login"><span class="eyebrow">{{ 'ADMINISTRATOR' if admin_mode else 'WELCOME BACK' }}</span><h2>{{ 'Admin sign in' if admin_mode else 'Sign in to Trainly' }}</h2><p>{{ 'Manage creator and learner accounts for your workspace.' if admin_mode else 'Pick up where your learning journey left off.' }}</p>
+    <div class="field"><label for="email">Work email</label><input id="email" type="email" value="{{ 'admin@trainly.local' if admin_mode else 'creator@trainly.local' }}" required autocomplete="username"></div>
+    <div class="field"><label for="password">Password</label><input id="password" type="password" value="trainly" required autocomplete="current-password"></div><button class="button" style="width:100%;margin-top:8px">Sign in</button>
+    <div class="demo-box"><strong>Explore with demo accounts</strong>Creator: creator@trainly.local<br>Learner: learner@trainly.local<br>Admin: admin@trainly.local<br>Password: trainly</div><p class="switch-auth"><a href="{{ '/' if admin_mode else '/admin' }}">{{ 'Standard sign in' if admin_mode else 'Administrator sign in' }}</a></p>
+  </form></section>
+</main>
