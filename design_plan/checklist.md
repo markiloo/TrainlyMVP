@@ -14,6 +14,12 @@ Use this checklist to track work against the [product requirements](./prd.md) an
 - [x] Confirm creator and learner flows against the migrated routes before adding new product features.
 - [x] Move database access into short, explicit units of work; SQLAlchemy models and Alembic migrations remain a separate step.
 
+### Adopt SQLAlchemy, Alembic, and Jinja2
+
+- [ ] Replace the raw `sqlite3` schema and query helpers in `data.py` with SQLAlchemy 2.x models and explicit sessions per request and per worker unit of work. Keep write ahead logging, foreign key enforcement, and the busy timeout on every connection, and preserve the current API paths and JSON response shapes.
+- [ ] Convert the hand-written migrations in `migrations.py` to Alembic revisions. Use the existing `PRAGMA user_version` migrations as the baseline so local databases upgrade in place, and confirm the app and worker still open an existing database without manual steps.
+- [ ] Move page rendering from the single client-rendered `templates/index.html` shell to Jinja2 templates with HTML autoescaping enabled for server data. Keep browser behavior that needs immediate interaction, such as the video timeline, knowledge checks, and progress saves, in `static/app.js`.
+
 ## 2. Accounts, workspaces, and assignments
 
 - [x] Seed admin, creator, and learner demo accounts and support sign-in with hashed passwords. (F1)
