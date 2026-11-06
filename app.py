@@ -1640,7 +1640,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(
         app,
-        host=os.environ.get("TRAINLY_HOST", "127.0.0.1"),
+        host=os.environ.get("TRAINLY_HOST", "192.168.254.109"),
         port=port,
         ssl_certfile=os.environ.get("TRAINLY_SSL_CERTFILE") or None,
         ssl_keyfile=os.environ.get("TRAINLY_SSL_KEYFILE") or None,
