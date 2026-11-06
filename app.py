@@ -438,6 +438,16 @@ def player_view(mid: str, request: Request, attempt_id: str, user=Depends(requir
     })
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+def favicon():
+    return FileResponse(ROOT / "static" / "favicon.svg", media_type="image/svg+xml")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon_ico():
+    return FileResponse(ROOT / "static" / "favicon.ico", media_type="image/x-icon")
+
+
 @app.get("/app.css")
 def css():
     return FileResponse(ROOT / "static" / "app.css", media_type="text/css")
