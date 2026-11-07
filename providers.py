@@ -43,11 +43,16 @@ def _timeout() -> float:
 
 def ai_status() -> dict[str, Any]:
     base = _base_url()
-    local = transcription_backend() == 'local'
+    try:
+        backend = transcription_backend()
+    except ProviderNotConfigured:
+        # Report a misconfigured backend instead of failing the status endpoint.
+        backend = 'invalid'
+    local = backend == 'local'
     return {
-        "ai_enabled": ai_enabled(),
+        "ai_enabled": backend not in ('disabled', 'invalid'),
         "ai_provider": 'Local Whisper (CPU)' if local else 'OpenAI-compatible' if base else None,
-        "transcription_backend": transcription_backend(),
+        "transcription_backend": backend,
         "transcription_model": os.environ.get('TRAINLY_LOCAL_TRANSCRIBE_MODEL', 'small.en') if local else os.environ.get("TRAINLY_TRANSCRIBE_MODEL", "whisper-1"),
         "draft_model": None if local else os.environ.get("TRAINLY_DRAFT_MODEL", "gpt-4o-mini"),
     }

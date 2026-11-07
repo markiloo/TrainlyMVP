@@ -19,7 +19,8 @@ if connection is not None:
 elif context.is_offline_mode():
     raise RuntimeError('Trainly migrations inspect SQLite; use an online database connection.')
 else:
-    # Importing data would seed the app and recursively invoke Alembic.
+    # Importing data would open a second engine and its startup bootstrap owns
+    # the upgrade; run migrations through the shared runner instead.
     from migrations import upgrade_database
     engine = make_engine(Path(os.environ.get('TRAINLY_DB', 'trainly.sqlite3')))
     upgrade_database(engine, runner=run)

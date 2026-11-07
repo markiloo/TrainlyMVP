@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, hmac, json, math, os, secrets, shutil, subprocess, time, uuid
+import hashlib, hmac, json, math, os, secrets, shutil, subprocess, threading, time, uuid
 from pathlib import Path
 from database import TrainlySession, make_engine, unit_of_work
 from migrations import upgrade_database
@@ -139,11 +139,36 @@ def captions_vtt(segments):
     return '\n'.join(lines)
 
 engine = make_engine(DB)
-upgrade_database(engine)
+
+_bootstrapped = False
+_bootstrap_lock = threading.Lock()
+
+
+def bootstrap():
+    """Apply migrations and demo seeds once per process, on first database use.
+
+    Importing this module does not open or change the database. The app's
+    startup hook and the worker run this before serving requests or claiming
+    jobs, and ``db()`` guards callers that reach the database directly.
+    """
+    global _bootstrapped
+    if _bootstrapped:
+        return
+    with _bootstrap_lock:
+        if _bootstrapped:
+            return
+        upgrade_database(engine)
+        seed()
+        ensure_workspace()
+        ensure_seed_assignment()
+        ensure_published_versions()
+        ensure_video_demo()
+        _bootstrapped = True
 
 
 def db():
-    """Open an explicit SQLAlchemy unit of work; the caller commits and closes it."""
+    """Open an explicit SQLAlchemy unit of work after one-time startup setup."""
+    bootstrap()
     return TrainlySession(engine, expire_on_commit=False)
 
 
@@ -153,13 +178,15 @@ def seed():
             c.execute(insert(User).values(email=email, name=name, password=password_hash(pwd), role=role).on_conflict_do_nothing())
         if not c.scalar(select(TrainingModule.id).limit(1)):
             owner=c.scalar(select(User.id).where(User.role == 'creator').limit(1)); mid='workplace-safety'
-            c.execute(insert(TrainingModule).values(id=mid, owner=owner, title='Workplace safety essentials', description='A practical introduction to safer, more confident work.', duration=568, status='published', published_at=int(time.time())))
+            c.execute(insert(TrainingModule).values(id=mid, owner=owner, title='Workplace safety essentials', description='A practical introduction to safer, more confident work.', duration=568))
             lessons=[('Start with awareness','Notice hazards early and make safety part of every decision.',0,180),('Protect yourself and your team','Use protective equipment and keep shared spaces clear.',180,390),('Respond with confidence','Know how to report an incident and get help quickly.',390,568)]
             for i,(t,s,a,b) in enumerate(lessons): c.execute(insert(Lesson).values(id=str(uuid.uuid4()), module_id=mid, ord=i, title=t, summary=s, start=a, end=b, origin='manual'))
             qs=[('What should you do when you notice a new hazard?',['Ignore it if no one is hurt','Make the area safe and report it','Wait until the end of your shift'],1,'Act early: make the situation safe and let the right person know.',170),('When should protective equipment be used?',['Whenever the task or site requires it','Only when a manager is nearby','Only after an incident'],0,'Follow the requirements for the task and the work area.',380),('What is the best first step after an incident?',['Keep it to yourself','Report it promptly and get help','Post about it online'],1,'Prompt reporting helps the team respond and prevent repeat incidents.',568)]
             for i,(p,o,a,e,t) in enumerate(qs): c.execute(insert(Question).values(id=str(uuid.uuid4()), module_id=mid, ord=i, prompt=p, options=json.dumps(o), answer=a, explanation=e, at=t, origin='manual'))
-
-seed()
+            c.flush()
+            # The offline demo ships without media, so it publishes through the
+            # shared path with the video requirement explicitly turned off.
+            publish_module(c, model_record(c.get(TrainingModule, mid)), require_video=False)
 
 def ensure_workspace():
     with unit_of_work(engine) as session:
@@ -167,18 +194,12 @@ def ensure_workspace():
         for user in session.scalars(select(User).where(~User.id.in_(select(Membership.user_id)))):
             session.execute(insert(Membership).values(workspace_id='local', user_id=user.id, role=user.role).on_conflict_do_nothing())
 
-
-ensure_workspace()
-
-
 def ensure_seed_assignment():
     with unit_of_work(engine) as session:
         learner = session.scalar(select(User.id).where(User.role == 'learner').order_by(User.id).limit(1))
         if learner and session.get(TrainingModule, 'workplace-safety'):
             session.execute(insert(Assignment).values(module_id='workplace-safety', learner=learner, assigned_at=int(time.time())).on_conflict_do_nothing())
 
-
-ensure_seed_assignment()
 
 
 def model_record(model):
@@ -188,6 +209,18 @@ def model_record(model):
 
 def module_row(session, mid):
     return model_record(session.get(TrainingModule, mid))
+
+
+def valid_check_timestamp(session, mid, module, at):
+    """A knowledge check sits inside a lesson or at the end of the video."""
+    if at is None or at < 0 or (module["duration"] and at > module["duration"]):
+        return False
+    lessons = session.execute("SELECT start,end FROM lessons WHERE module_id=? ORDER BY start", (mid,)).fetchall()
+    if not lessons:
+        return True
+    if module["duration"] and at == module["duration"]:
+        return True
+    return any(lesson["start"] <= at <= lesson["end"] for lesson in lessons)
 
 
 def attempt_state(session, attempt):
@@ -265,6 +298,39 @@ def published_package(c,m,include_answers=False):
         for question in data['questions']: question.pop('answer',None)
     return data
 
+
+def publish_module(session, module, require_video=True):
+    """Validate module content and save an immutable published snapshot.
+
+    The creator publish route requires a playable video. Seeded demo content
+    that ships without media passes ``require_video=False`` explicitly.
+    """
+    mid = module['id']
+    lessons = list(session.execute("SELECT * FROM lessons WHERE module_id=? ORDER BY start", (mid,)).fetchall())
+    questions = list(session.execute("SELECT * FROM questions WHERE module_id=?", (mid,)).fetchall())
+    has_video = bool(module['video']) and (FILES / module['video']).is_file()
+    if not module['title'].strip() or not lessons or not questions or (require_video and not has_video):
+        raise ValueError('Add a title, playable video, at least one lesson, and at least one valid quiz question before publishing.')
+    for i, lesson in enumerate(lessons):
+        if lesson['start'] < 0 or lesson['end'] <= lesson['start'] or lesson['end'] > module['duration'] or (i and lesson['start'] < lessons[i - 1]['end']):
+            raise ValueError('Lesson times must be valid, stay within the video, and cannot overlap.')
+    for question in questions:
+        options = json.loads(question['options'])
+        if not question['prompt'].strip() or not question['explanation'].strip() or len(options) < 2 or question['answer'] not in range(len(options)) or question['at'] < 0 or question['at'] > module['duration']:
+            raise ValueError('Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.')
+        if not valid_check_timestamp(session, mid, module, question['at']):
+            raise ValueError('Place each knowledge check inside a lesson range or at the end of the video.')
+    version = module['published_version'] + 1
+    snapshot = package(session, module, True)
+    snapshot.update(status='published', version=version)
+    now = int(time.time())
+    session.execute(
+        "INSERT INTO module_versions(module_id,version,snapshot,video,created_at,playback_video,media_asset_id) VALUES(?,?,?,?,?,?,?)",
+        (mid, version, json.dumps(snapshot), module['video'], now, module['playback_video'], module['media_asset_id']),
+    )
+    session.execute("UPDATE modules SET status='published',published_at=?,published_version=? WHERE id=?", (now, version, mid))
+    return version
+
 def record_event(session, name, workspace_id=None, user_id=None, module_id=None, meta=None):
     """Store product metadata without video or transcript content."""
     session.add(Event(name=name, workspace_id=workspace_id, user_id=user_id, module_id=module_id,
@@ -312,10 +378,6 @@ def ensure_published_versions():
             module.published_version = 1
             session.execute(update(Attempt).where(Attempt.module_id == module.id, Attempt.version == 0).values(version=1))
 
-
-ensure_published_versions()
-
-
 def ensure_video_demo():
     """Make the bundled video a ready-to-play module in existing and fresh demos."""
     source = ROOT / 'vids' / 'sample vid.mp4'
@@ -324,8 +386,7 @@ def ensure_video_demo():
     target = FILES / 'ltspice-models-demo.mp4'
     if not target.is_file() or target.stat().st_size != source.stat().st_size:
         shutil.copyfile(source, target)
-    c = db()
-    try:
+    with unit_of_work(engine) as c:
         mid = 'ltspice-models-demo'
         if c.get(TrainingModule, mid):
             return
@@ -356,8 +417,3 @@ def ensure_video_demo():
         c.execute(insert(ModuleVersion).values(module_id=mid, version=1, snapshot=json.dumps(snapshot), video=target.name, created_at=now, playback_video=target.name))
         if learner:
             c.execute(insert(Assignment).values(module_id=mid, learner=learner.id, assigned_at=now).on_conflict_do_nothing())
-        c.commit()
-    finally:
-        c.close()
-
-ensure_video_demo()

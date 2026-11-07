@@ -13,6 +13,7 @@ from models import ProcessingJob, MediaAsset, TrainingModule
 from data import model_record
 from data import (
     FILES,
+    bootstrap,
     db,
     extract_audio,
     inspect_video_details,
@@ -160,7 +161,15 @@ def process_one():
     notice = None
     error = None
 
-    if providers.ai_enabled():
+    try:
+        ai_enabled = providers.ai_enabled()
+    except ValueError:
+        # A misconfigured backend must not strand the job in 'processing'.
+        ai_enabled, config_error = False, True
+    else:
+        config_error = False
+
+    if ai_enabled:
         provider = providers.ai_status()["ai_provider"]
         if not details.get("audio_codec"):
             transcript_state = "no_audio"
@@ -204,7 +213,11 @@ def process_one():
     else:
         transcript_state = "not_configured"
         draft_state = "not_configured"
-        notice = "Automatic transcription is not configured. The video is ready; add lessons and questions manually or configure a provider and retry."
+        notice = (
+            "Automatic transcription is not configured. Set TRAINLY_TRANSCRIPTION_BACKEND to disabled, local, or http, then retry."
+            if config_error else
+            "Automatic transcription is not configured. The video is ready; add lessons and questions manually or configure a provider and retry."
+        )
 
     finish_job(
         job,
@@ -226,6 +239,7 @@ def process_one():
 
 
 def main():
+    bootstrap()
     parser = argparse.ArgumentParser(description="Process Trainly video jobs")
     parser.add_argument("--once", action="store_true", help="Process one queued job and exit")
     args = parser.parse_args()

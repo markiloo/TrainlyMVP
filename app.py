@@ -21,9 +21,9 @@ from starlette.templating import Jinja2Templates
 from datetime import datetime
 
 from data import (
-    COOKIE_SECURE, FILES, ROOT, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, attempt_snapshot, attempt_state, captions_vtt, db,
-    finite_number, generated_draft, module_row, package, password_hash,
-    password_matches, published_package, record_event,
+    COOKIE_SECURE, FILES, ROOT, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, attempt_snapshot, attempt_state, bootstrap,
+    captions_vtt, db, finite_number, generated_draft, module_row, package, password_hash,
+    password_matches, publish_module, published_package, record_event, valid_check_timestamp,
 )
 from providers import ai_status
 from data import explanation_link, invalidate_explanation_links
@@ -52,6 +52,7 @@ def handle_loop_exception(loop, context):
 @asynccontextmanager
 async def lifespan(_app):
     asyncio.get_running_loop().set_exception_handler(handle_loop_exception)
+    bootstrap()
     yield
 
 
@@ -231,18 +232,6 @@ def owned_module(c, mid, user):
     if user["workspace_role"] != "creator" or m["workspace_id"] != user["workspace_id"] or m["owner"] != user["id"]:
         fail(403, "Creator access is required.")
     return m
-
-
-def valid_check_timestamp(c, mid, m, at):
-    """A knowledge check sits inside a lesson or at the end of the video."""
-    if at is None or at < 0 or (m["duration"] and at > m["duration"]):
-        return False
-    lessons = c.execute("SELECT start,end FROM lessons WHERE module_id=? ORDER BY start", (mid,)).fetchall()
-    if not lessons:
-        return True
-    if m["duration"] and at == m["duration"]:
-        return True
-    return any(lesson["start"] <= at <= lesson["end"] for lesson in lessons)
 
 
 def can_view(c, m, user):
@@ -1344,25 +1333,10 @@ async def update_items(mid: str, kind: str, request: Request, user=Depends(creat
 def publish(mid: str, user=Depends(creator)):
     with connection() as c:
         m = owned_module(c, mid, user)
-        lessons = c.execute("SELECT * FROM lessons WHERE module_id=? ORDER BY start", (mid,)).fetchall()
-        questions = c.execute("SELECT * FROM questions WHERE module_id=?", (mid,)).fetchall()
-        if not m["title"].strip() or not lessons or not questions or not m["video"] or not (FILES / m["video"]).is_file():
-            fail(400, "Add a title, playable video, at least one lesson, and at least one valid quiz question before publishing.")
-        for i, lesson in enumerate(lessons):
-            if lesson["start"] < 0 or lesson["end"] <= lesson["start"] or lesson["end"] > m["duration"] or (i and lesson["start"] < lessons[i - 1]["end"]):
-                fail(400, "Lesson times must be valid, stay within the video, and cannot overlap.")
-        for q in questions:
-            opts = json.loads(q["options"])
-            if not q["prompt"].strip() or not q["explanation"].strip() or len(opts) < 2 or q["answer"] not in range(len(opts)) or q["at"] < 0 or q["at"] > m["duration"]:
-                fail(400, "Each question needs a prompt, explanation, two non-empty options, one correct answer, and a valid timestamp.")
-            if not valid_check_timestamp(c, mid, m, q["at"]):
-                fail(400, "Place each knowledge check inside a lesson range or at the end of the video.")
-        version = m["published_version"] + 1
-        snapshot = package(c, m, True)
-        snapshot.update(status="published", version=version)
-        now = int(time.time())
-        c.execute("INSERT INTO module_versions(module_id,version,snapshot,video,created_at,playback_video,media_asset_id) VALUES(?,?,?,?,?,?,?)", (mid, version, json.dumps(snapshot), m["video"], now, m["playback_video"], m["media_asset_id"]))
-        c.execute("UPDATE modules SET status='published',published_at=?,published_version=? WHERE id=?", (now, version, mid))
+        try:
+            version = publish_module(c, m)
+        except ValueError as exc:
+            fail(400, str(exc))
         record_event(c, "module_published", user["workspace_id"], user["id"], mid, {"version": version})
         return {"ok": True, "version": version}
 
@@ -1640,7 +1614,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(
         app,
-        host=os.environ.get("TRAINLY_HOST", "192.168.254.109"),
+        host=os.environ.get("TRAINLY_HOST", "127.0.0.1"),
         port=port,
         ssl_certfile=os.environ.get("TRAINLY_SSL_CERTFILE") or None,
         ssl_keyfile=os.environ.get("TRAINLY_SSL_KEYFILE") or None,

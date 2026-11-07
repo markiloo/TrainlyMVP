@@ -80,3 +80,25 @@ def test_local_worker_creates_transcript_only_draft(setup_app, monkeypatch):
     assert applied.status_code == 200
     assert applied.json()['module']['transcript'][0]['text'] == 'Local source'
     assert client.delete(f'/api/modules/{mid}', headers=h).status_code == 204
+
+
+def test_invalid_transcription_backend_leaves_the_job_ready_for_manual_work(setup_app, monkeypatch):
+    import importlib
+    from test_api import sign_in
+    api, client = setup_app
+    monkeypatch.setenv('TRAINLY_TRANSCRIPTION_BACKEND', 'bogus')
+    assert client.get('/api/config').json()['transcription_backend'] == 'invalid'
+    worker = importlib.import_module('worker')
+    h = sign_in(client, 'creator@trainly.local')
+    mid = client.post('/api/modules', json={'title': 'Misconfigured backend'}, headers=h).json()['id']
+    response = client.post(f'/api/modules/{mid}/upload', files={'file': ('sample.mp4', b'mocked media', 'video/mp4')}, headers=h)
+    job_id = response.json()['job_id']
+    monkeypatch.setattr(worker, 'inspect_video_details',
+                        lambda *args: dict(duration=10, container=['mp4'], video_codec='h264', audio_codec='aac'))
+    monkeypatch.setattr(worker, 'prepare_browser_playback', lambda path, *args: (path, False))
+    assert worker.process_one()
+    job = client.get(f'/api/modules/{mid}/uploads/{job_id}').json()
+    assert job['state'] == 'ready'
+    assert job['transcript_state'] == 'not_configured' and job['draft_state'] == 'not_configured'
+    assert 'TRAINLY_TRANSCRIPTION_BACKEND' in job['message']
+    assert client.delete(f'/api/modules/{mid}', headers=h).status_code == 204

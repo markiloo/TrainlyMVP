@@ -144,3 +144,18 @@ def test_failed_upgrade_rolls_back_schema_and_revision(tmp_path, monkeypatch):
         assert 'memberships_legacy' not in inspect(connection).get_table_names()
         assert 'alembic_version' not in inspect(connection).get_table_names()
     engine.dispose()
+
+
+def test_importing_modules_does_not_open_or_seed_the_database(tmp_path, monkeypatch):
+    import importlib
+    monkeypatch.setenv('TRAINLY_DB', str(tmp_path / 'lazy.sqlite3'))
+    monkeypatch.setenv('TRAINLY_STORAGE', str(tmp_path / 'media'))
+    for name in ('data', 'app', 'worker', 'providers', 'migrations'):
+        sys.modules.pop(name, None)
+    data = importlib.import_module('data')
+    assert not (tmp_path / 'lazy.sqlite3').exists()
+    monkeypatch.setattr(data, 'ROOT', tmp_path)
+    data.bootstrap()
+    assert (tmp_path / 'lazy.sqlite3').is_file()
+    with data.db() as session:
+        assert session.execute('SELECT COUNT(*) FROM users').fetchone()[0] >= 3
