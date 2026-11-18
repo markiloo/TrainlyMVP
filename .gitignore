@@ -10,3 +10,4 @@ trainly.sqlite3-wal
 storage/*
 !storage/.gitkeep
 vids
+screenshots/

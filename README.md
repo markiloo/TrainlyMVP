@@ -2,6 +2,12 @@
 
 Trainly turns training into a module with lessons, timed knowledge checks, and learner results. This local MVP uses FastAPI, Uvicorn, SQLAlchemy 2.x with SQLite, Alembic migrations, and Jinja2 pages with vanilla JavaScript interactions.
 
+![Creator dashboard in Trainly](./screenshots/02-creator-dashboard.png)
+
+_The creator workspace lists modules with their published state, lesson and question counts, and assign, results, and edit actions._
+
+A wider set of demo captures (sign-in, editor, results, calls, admin console, learner dashboard, player, knowledge check, and a phone-width player view) lives in `screenshots/`.
+
 ## Run locally
 
 From this folder, install dependencies and start the server with:
